@@ -1,0 +1,881 @@
+// prisma/schema.prisma
+// Foundation schema (Option 2: replicate curriculum per Organisation)
+// Prisma v7+ (datasource url moved to prisma.config.ts)
+// Runtime DB connection is provided via PrismaClient({ adapter }) in your Node code.
+//
+// NOTES:
+// - This schema is the authoritative foundation for multi-tenant RAG with pgvector-first.
+// - Curriculum content is ALWAYS org-owned (replicated per org). No global/public curriculum rows.
+// - Embeddings are stored via Embedding.vector (pgvector column created via SQL migration).
+// - RLS-ready: orgId is required on all tenant-owned entities used in retrieval.
+//
+// After migrating, you will also run SQL migrations:
+//   CREATE EXTENSION IF NOT EXISTS vector;
+//   ALTER TABLE "Embedding" ADD COLUMN "vector" vector(<DIMS>);
+//   CREATE INDEX ... USING hnsw ... (after backfill)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Enums
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+enum ScienceDomain {
+  BIOLOGY
+  CHEMISTRY
+  PHYSICS
+  GENERAL_SCIENCE
+}
+
+enum Role {
+  STUDENT
+  PARENT
+  STAFF
+  ADMIN
+}
+
+enum Subject {
+  MATHS
+  SCIENCE
+  COMPUTING
+}
+
+enum KeyStage {
+  KS1
+  KS2
+  KS3
+  KS4
+}
+
+enum TutoringMode {
+  AUTO
+  GENTLE
+  COACH
+}
+
+enum Verbosity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum StepSize {
+  SMALL
+  NORMAL
+}
+
+enum TaskType {
+  CHAT
+  CHECK_WORK
+  MICRO_LESSON
+  MINI_QUIZ
+  PRACTICE_SET
+}
+
+enum AssessmentContext {
+  HOMEWORK
+  CLASSWORK
+  REVISION
+  ASSESSED
+  UNKNOWN
+}
+
+enum AttemptStatus {
+  STARTED
+  SUBMITTED
+  ABANDONED
+}
+
+enum HelpLevel {
+  NONE
+  HINT
+  EXAMPLE
+  MICRO_LESSON
+}
+
+enum UploadType {
+  QUESTION
+  STUDENT_WORK
+  SUPPORTING_MATERIAL
+}
+
+enum StorageProvider {
+  LOCAL
+  S3
+  AZURE_BLOB
+}
+
+enum ChunkType {
+  OBJECTIVE
+  EXPLANATION
+  WORKED_EXAMPLE
+  MISCONCEPTION
+  PRACTICE
+  COMMAND_WORDS
+  GLOSSARY
+}
+
+enum DifficultyBand {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum MasteryTrend {
+  IMPROVING
+  FLAT
+  DECLINING
+}
+
+enum ConsentState {
+  UNKNOWN
+  GRANTED
+  DENIED
+}
+
+enum VisibilityScope {
+  ORG_ONLY
+  COHORT
+  STAFF_ONLY
+  STUDENT_OWNED
+}
+
+enum RagLane {
+  STRUCTURED_OBJECTIVE
+  FREE_TEXT_LESSON
+  HOMEWORK_HELP
+}
+
+enum EmbeddingStatus {
+  PENDING
+  READY
+  FAILED
+}
+
+enum HomeworkLinkType {
+  SAME_OBJECTIVE
+  SAME_TOPIC
+  PREREQ_GAP
+  WORKED_EXAMPLE_MATCH
+}
+
+enum StudentVectorType {
+  INTERESTS
+  MISCONCEPTIONS
+  STRENGTHS
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Core Identity
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model Organisation {
+  id       String  @id @default(cuid())
+  name     String
+  slug     String  @unique
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users                User[]
+  students             Student[]
+  curriculumSources    CurriculumSource[]
+  ragTraces            RagTrace[]
+  embeddings           Embedding[]
+  curriculumObjectives CurriculumObjective[]
+  contentChunks        ContentChunk[]
+  uploads              Upload[]
+  uploadChunks         UploadChunk[]
+  homeworkLinks        HomeworkLink[]
+  tutorThreads         TutorThread[]
+  attempts             Attempt[]
+  attemptItems         AttemptItem[]
+  objectiveMasteries   ObjectiveMastery[]
+  studentVectors       StudentVector[]
+  auditEvents          AuditEvent[]
+
+  @@index([isActive])
+}
+
+model User {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  email        String  @unique
+  passwordHash String
+  role         Role    @default(STUDENT)
+  isActive     Boolean @default(true)
+
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // If role == STUDENT, they will typically have a linked Student record
+  student     Student?
+  sessions    Session[]
+  auditEvents AuditEvent[]
+
+  @@index([organisationId])
+  @@index([role])
+  @@index([isActive])
+}
+
+model Session {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Student + Profile (ND/NT expressed as preferences / delivery constraints)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model Student {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Basic identity (keep minimal)
+  firstName   String?
+  lastName    String?
+  dateOfBirth DateTime?
+  age         Int // 4..18 validated in app layer
+  keyStage    KeyStage?
+  subjects    Subject[]
+
+  // Parental consent / data handling
+  guardianEmail String?
+  consentState  ConsentState @default(UNKNOWN)
+
+  preferences StudentPreference?
+  mastery     ObjectiveMastery[]
+  attempts    Attempt[]
+  uploads     Upload[]
+  threads     TutorThread[]
+  vectors     StudentVector[]
+
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  ragTraces RagTrace[]
+
+  @@index([organisationId])
+  @@index([keyStage])
+}
+
+model StudentPreference {
+  id        String  @id @default(cuid())
+  studentId String  @unique
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  tutoringMode TutoringMode @default(AUTO)
+  verbosity    Verbosity    @default(LOW)
+  stepSize     StepSize     @default(SMALL)
+
+  // Delivery constraints / ND-friendly toggles
+  lowStimulus      Boolean @default(true)
+  avoidMetaphors   Boolean @default(false)
+  useBullets       Boolean @default(true)
+  moreExamples     Boolean @default(true)
+  frequentCheckIns Boolean @default(true)
+
+  // Optional reading level hints
+  readingLevel      Int? // e.g. 1..10 (your scale)
+  attentionSpanMins Int? // e.g. 5..30
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Curriculum + Content (RAG-ready; replicated per org)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model CurriculumSource {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  name        String
+  slug        String
+  description String?
+  license     String // e.g. "OGL v3", "CC BY 4.0"
+  attribution String?
+  url         String?
+
+  visibility VisibilityScope @default(ORG_ONLY)
+  isActive   Boolean         @default(true)
+
+  objectives CurriculumObjective[]
+  chunks     ContentChunk[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organisationId, slug])
+  @@index([organisationId])
+  @@index([visibility])
+  @@index([isActive])
+}
+
+model CurriculumObjective {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  // Stable “Objective Code” you control (great for linking mastery over time)
+  // Example: "MATH.KS2.Y4.FRACTIONS.EQUIV.001"
+  code String
+
+  subject   Subject
+  keyStage  KeyStage
+  yearGroup Int? // KS3/KS4 might be null if you use bands
+  strand    String // e.g. "Fractions", "Number", "Forces"
+  title     String
+  statement String // objective text
+  statutory Boolean  @default(true)
+
+  keywords String[] // for retrieval / routing
+
+  sourceId String
+  source   CurriculumSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  visibility VisibilityScope @default(ORG_ONLY)
+  isActive   Boolean         @default(true)
+
+  chunks       ContentChunk[]
+  mastery      ObjectiveMastery[]
+  attemptItems AttemptItem[]
+
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  homeworkLinks HomeworkLink[]
+  attempts      Attempt[]
+
+  @@unique([organisationId, code])
+  @@index([organisationId])
+  @@index([subject, keyStage])
+  @@index([keyStage, yearGroup])
+  @@index([strand])
+  @@index([visibility])
+  @@index([sourceId])
+  @@index([isActive])
+}
+
+model ContentChunk {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  sourceId String
+  source   CurriculumSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  objectiveId String?
+  objective   CurriculumObjective? @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
+
+  subject   Subject
+  keyStage  KeyStage
+  yearGroup Int?
+  strand    String?
+
+  type       ChunkType
+  difficulty DifficultyBand @default(MEDIUM)
+
+  // RAG storage
+  content    String
+  tokenCount Int?
+
+  // Deterministic dedupe/cache key for this exact content payload
+  // (compute in app: sha256(normalizedContent))
+  contentSha256 String @unique
+
+  // Citation anchors (e.g., "oak:lesson:xyz#p3", "pdf:p2:box(…)")
+  citations String[]
+  tags      String[]
+
+  visibility VisibilityScope @default(ORG_ONLY)
+  isActive   Boolean         @default(true)
+
+  // Science domain tagging
+  scienceDomain           ScienceDomain?
+  scienceDomainConfidence Float?
+  scienceDomainModel      String?
+  scienceDomainTaggedAt   DateTime?
+
+  // Embedding pointer (pgvector stored on Embedding.vector)
+  embeddingId String?
+  embedding   Embedding? @relation(fields: [embeddingId], references: [id], onDelete: SetNull)
+
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  homeworkLinks HomeworkLink[]
+
+  @@index([organisationId])
+  @@index([sourceId])
+  @@index([objectiveId])
+  @@index([subject, keyStage, yearGroup])
+  @@index([type])
+  @@index([difficulty])
+  @@index([visibility])
+  @@index([isActive])
+  @@index([scienceDomain])
+  @@index([scienceDomainConfidence])
+  @@index([embeddingId])
+}
+
+model CommandWord {
+  id         String   @id @default(cuid())
+  subject    Subject
+  word       String // "explain", "calculate", "compare"
+  definition String
+  scaffolds  String[] // bullet templates / structure prompts
+  examples   String[] // short examples
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([subject, word])
+  @@index([word])
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Embeddings (pgvector-first)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model Embedding {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  model  String
+  dims   Int
+  status EmbeddingStatus @default(PENDING)
+  error  String?
+
+  // Content-addressable cache key for this embedding input (sha256 of embedding input text + any recipe params)
+  inputSha256 String @unique
+
+  // pgvector column added by SQL migration:
+  //   ALTER TABLE "Embedding" ADD COLUMN "vector" vector(<DIMS>);
+  // vector column is managed manually via SQL (pgvector); not represented in Prisma schema
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Backrefs
+  contentChunks  ContentChunk[]
+  uploadChunks   UploadChunk[]
+  studentVectors StudentVector[]
+
+  @@index([organisationId])
+  @@index([status])
+  @@index([model])
+  @@index([dims])
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Uploads + UploadChunks (homework correlation)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model Upload {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  type         UploadType
+  originalName String
+  mimeType     String
+  sizeBytes    BigInt
+
+  storage        StorageProvider @default(LOCAL)
+  storageKey     String // path/key in storage provider
+  checksumSha256 String?
+
+  // Optional extracted text (OCR / parsing)
+  extractedText String?
+  ocrConfidence Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations to attempts/threads
+  attemptId String?
+  attempt   Attempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+
+  threadId String?
+  thread   TutorThread? @relation(fields: [threadId], references: [id], onDelete: SetNull)
+
+  chunks UploadChunk[]
+  links  HomeworkLink[]
+
+  @@index([organisationId])
+  @@index([studentId])
+  @@index([attemptId])
+  @@index([threadId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model UploadChunk {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  uploadId String
+  upload   Upload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  chunkIndex Int
+  content    String
+  tokenCount Int?
+
+  // Citation anchors for the original uploaded document
+  pageNumber Int?
+  locator    Json? // bbox, offsets, etc.
+
+  // Dedupe/cache key
+  contentSha256 String
+
+  embeddingId String?
+  embedding   Embedding? @relation(fields: [embeddingId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([uploadId, chunkIndex])
+  @@index([organisationId])
+  @@index([uploadId])
+  @@index([embeddingId])
+}
+
+model HomeworkLink {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  uploadId String
+  upload   Upload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  // Links to curriculum
+  objectiveId String?
+  objective   CurriculumObjective? @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
+
+  contentChunkId String?
+  contentChunk   ContentChunk? @relation(fields: [contentChunkId], references: [id], onDelete: SetNull)
+
+  linkType HomeworkLinkType
+  score    Float
+
+  createdAt DateTime @default(now())
+
+  @@index([organisationId])
+  @@index([uploadId])
+  @@index([objectiveId])
+  @@index([contentChunkId])
+  @@index([linkType])
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Tutor Threads (chat history + agentic tasks)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model TutorThread {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  subject           Subject
+  taskType          TaskType          @default(CHAT)
+  assessmentContext AssessmentContext @default(UNKNOWN)
+
+  // Lightweight “state” blob for agent (kept small; don’t store entire prompts)
+  state Json?
+
+  messages  TutorMessage[]
+  uploads   Upload[]
+  attempts  Attempt[]
+  ragTraces RagTrace[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organisationId])
+  @@index([studentId])
+  @@index([subject])
+  @@index([taskType])
+}
+
+model TutorMessage {
+  id       String      @id @default(cuid())
+  threadId String
+  thread   TutorThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  role    String // "user" | "assistant" | "system" (app-level)
+  content String
+  meta    Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([threadId, createdAt])
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Attempts + Items (mini quizzes, check-work scoring, micro-lessons)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model Attempt {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  subject           Subject
+  taskType          TaskType
+  assessmentContext AssessmentContext @default(UNKNOWN)
+
+  // What this attempt was about
+  primaryObjectiveId String?
+  primaryObjective   CurriculumObjective? @relation(fields: [primaryObjectiveId], references: [id], onDelete: SetNull)
+
+  // Optional link to tutor thread
+  threadId String?
+  thread   TutorThread? @relation(fields: [threadId], references: [id], onDelete: SetNull)
+
+  status AttemptStatus @default(STARTED)
+
+  // Scoring
+  score         Float? // 0..1 (computed)
+  helpUsed      HelpLevel @default(NONE)
+  timeOnTaskSec Int?
+
+  // Signals
+  frustration String? // "low" | "medium" | "high" (computed from behaviour)
+  notes       Json?
+
+  items   AttemptItem[]
+  uploads Upload[]
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  submittedAt DateTime?
+
+  @@index([organisationId])
+  @@index([studentId, createdAt])
+  @@index([subject])
+  @@index([taskType])
+  @@index([primaryObjectiveId])
+  @@index([threadId])
+  @@index([status])
+}
+
+model AttemptItem {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  attemptId String
+  attempt   Attempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  objectiveId String?
+  objective   CurriculumObjective? @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
+
+  // Question / rubric element (store prompt fragment or key)
+  prompt     String
+  type       String // "mcq" | "short" | "step" | "rubric"
+  difficulty DifficultyBand @default(MEDIUM)
+
+  // Student response
+  response  String?
+  isCorrect Boolean?
+  score     Float? // 0..1 per item
+
+  // Error tagging for weakness profile
+  errorTags          String[]
+  misconceptionCodes String[] // your controlled codes
+
+  createdAt DateTime @default(now())
+
+  @@index([organisationId])
+  @@index([attemptId])
+  @@index([objectiveId])
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Mastery model (weakness profile)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model ObjectiveMastery {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  objectiveId String
+  objective   CurriculumObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+
+  // Computed/updated over time
+  masteryScore    Float        @default(0.5) // 0..1
+  confidenceScore Float        @default(0.5) // 0..1
+  stabilityScore  Float        @default(0.5) // 0..1 (variance proxy)
+  trend           MasteryTrend @default(FLAT)
+
+  // Summaries
+  commonErrorTags String[]
+  lastSeenAt      DateTime?
+  attemptsCount   Int       @default(0)
+  correctCount    Int       @default(0)
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@unique([studentId, objectiveId])
+  @@index([organisationId])
+  @@index([studentId])
+  @@index([objectiveId])
+  @@index([masteryScore])
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Student Vectors (future adaptive retrieval)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model StudentVector {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  type StudentVectorType
+
+  embeddingId String
+  embedding   Embedding @relation(fields: [embeddingId], references: [id], onDelete: Cascade)
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@unique([studentId, type])
+  @@index([organisationId])
+  @@index([studentId])
+  @@index([type])
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// RAG Trace (auditability for retrieval + generation)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model RagTrace {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String?
+  student   Student? @relation(fields: [studentId], references: [id], onDelete: SetNull)
+
+  threadId String?
+  thread   TutorThread? @relation(fields: [threadId], references: [id], onDelete: SetNull)
+
+  lane RagLane
+
+  // Store hashes rather than raw text by default (privacy + size)
+  queryTextHash String
+
+  // Filters applied (scienceDomain, keyStage, subject, etc.)
+  filters Json?
+
+  // Retrieved chunk IDs + scores (JSON array)
+  retrieved Json?
+
+  promptHash String?
+  outputHash String?
+  modelUsed  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([organisationId, createdAt])
+  @@index([studentId, createdAt])
+  @@index([threadId, createdAt])
+  @@index([lane])
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+// Auditing (production-grade hygiene)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+model AuditEvent {
+  id             String        @id @default(cuid())
+  organisationId String?
+  organisation   Organisation? @relation(fields: [organisationId], references: [id], onDelete: SetNull)
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  action     String // e.g. "AUTH_LOGIN", "UPLOAD_CREATE", "ATTEMPT_SUBMIT"
+  entityType String? // e.g. "Student", "Attempt", "Upload"
+  entityId   String?
+  ip         String?
+  userAgent  String?
+  meta       Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([organisationId, createdAt])
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@index([entityType, entityId])
+}

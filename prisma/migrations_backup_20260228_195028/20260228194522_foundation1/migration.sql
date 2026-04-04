@@ -1,0 +1,3 @@
+-- Placeholder migration:
+-- This migration was created during a prior attempt to add pgvector column.
+-- It is intentionally empty because vector objects are managed manually.
