@@ -49,6 +49,7 @@ const TRANSCRIPT_CHUNK_CHARS = Number(
 const TRANSCRIPT_MAX_CHUNKS = Number(
   process.env.OAK_SYNC_TRANSCRIPT_MAX_CHUNKS ?? "20",
 );
+const DEFAULT_OAK_SUBJECTS = ["maths", "science", "computing", "english"];
 
 function now() {
   return Date.now();
@@ -58,6 +59,30 @@ function ms(n: number) {
 }
 function sha1(input: string) {
   return crypto.createHash("sha1").update(input).digest("hex");
+}
+function sha256(input: string) {
+  return crypto.createHash("sha256").update(input).digest("hex");
+}
+
+function normalizeOakSubjectSlug(value: string): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function resolveWantedOakSubjects(input?: string[]): string[] {
+  const raw = input?.length
+    ? input
+    : String(process.env.OAK_SUBJECTS ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+
+  const normalized = raw
+    .map(normalizeOakSubjectSlug)
+    .filter((value) => DEFAULT_OAK_SUBJECTS.includes(value));
+
+  return normalized.length ? [...new Set(normalized)] : DEFAULT_OAK_SUBJECTS;
 }
 
 function mapOakKsToEnumKeyStage(oakKs: string): KeyStage {
@@ -72,8 +97,18 @@ function mapOakKsToEnumKeyStage(oakKs: string): KeyStage {
 function mapOakSubjectToEnum(subjectSlug: string): Subject {
   const s = (subjectSlug ?? "").toLowerCase();
   if (s === "maths" || s === "math") return "MATHS";
-  if (s === "science") return "SCIENCE";
+  if (
+    s === "science" ||
+    s === "combined-science" ||
+    s === "combined_science" ||
+    s === "biology" ||
+    s === "chemistry" ||
+    s === "physics"
+  ) {
+    return "SCIENCE";
+  }
   if (s === "computing") return "COMPUTING";
+  if (s === "english") return "ENGLISH";
   return "MATHS";
 }
 
@@ -103,6 +138,102 @@ function chunkId(lessonSlug: string, type: ChunkType, suffix?: string) {
 function normalizeUnitsResponse(
   raw: any,
 ): Array<{ units: any[]; year?: any; title?: any }> {
+  const out: Array<{ units: any[]; year?: any; title?: any }> = [];
+
+  const pushGroup = (units: any[], meta?: { year?: any; title?: any }) => {
+    if (!Array.isArray(units) || !units.length) return;
+    out.push({
+      units,
+      year: meta?.year,
+      title: meta?.title,
+    });
+  };
+
+  const walk = (value: any, meta?: { year?: any; title?: any }) => {
+    if (!value) return;
+
+    if (Array.isArray(value)) {
+      if (value.length === 0) return;
+
+      // Shape A: [{ year, units: [...] }]
+      if (value.every((x) => x && Array.isArray(x.units))) {
+        for (const item of value) {
+          walk(item, meta);
+        }
+        return;
+      }
+
+      // Shape B: [unit, unit, ...]
+      if (
+        value.every(
+          (x) => x && typeof x === "object" && ("unitSlug" in x || "slug" in x),
+        )
+      ) {
+        pushGroup(value as any[], meta);
+        return;
+      }
+
+      for (const item of value) {
+        walk(item, meta);
+      }
+      return;
+    }
+
+    if (typeof value !== "object") return;
+
+    if (Array.isArray(value.units)) {
+      pushGroup(value.units, {
+        year: value.year ?? meta?.year,
+        title: value.title ?? value.examBoardTitle ?? meta?.title,
+      });
+    }
+
+    // KS4 maths often nests unit groups under tiers -> units.
+    if (Array.isArray(value.tiers)) {
+      for (const tier of value.tiers) {
+        walk(tier, {
+          year: value.year ?? meta?.year,
+          title:
+            tier?.title ??
+            tier?.tier ??
+            value.title ??
+            value.examBoardTitle ??
+            meta?.title,
+        });
+      }
+    }
+
+    // KS4 science often nests under examSubjects -> tiers -> units.
+    if (Array.isArray(value.examSubjects)) {
+      for (const examSubject of value.examSubjects) {
+        walk(examSubject, {
+          year: value.year ?? meta?.year,
+          title:
+            examSubject?.title ??
+            examSubject?.subject ??
+            value.title ??
+            value.examBoardTitle ??
+            meta?.title,
+        });
+      }
+    }
+
+    if (Array.isArray(value.years)) {
+      for (const year of value.years) {
+        walk(year, {
+          year: year?.year ?? value.year ?? meta?.year,
+          title: year?.title ?? value.title ?? meta?.title,
+        });
+      }
+    }
+  };
+
+  walk(raw);
+
+  if (out.length) {
+    return out;
+  }
+
   if (Array.isArray(raw)) {
     if (raw.length === 0) return [];
     // Shape A: [{year, units:[...]}]
@@ -377,18 +508,55 @@ function splitTranscript(
 }
 
 export async function ensureOakSource() {
+  const preferredSlug = (process.env.OAK_ORGANISATION_SLUG ?? "default").trim();
+  const organisation =
+    (await prisma.organisation.findFirst({
+      where: preferredSlug
+        ? {
+            OR: [{ slug: preferredSlug }, { isActive: true }],
+          }
+        : { isActive: true },
+      orderBy: [{ slug: "asc" }],
+      select: {
+        id: true,
+        slug: true,
+        name: true,
+        isActive: true,
+      },
+    })) ??
+    null;
+
+  if (!organisation) {
+    throw new Error("No organisation found for Oak sync");
+  }
+
   // Aligned: CurriculumSource.slug is @unique in your schema
   if (DRY_RUN) {
     console.log("[oak] DRY_RUN=1 — skipping CurriculumSource upsert");
     const existing = await prisma.curriculumSource.findUnique({
-      where: { slug: "oak" },
+      where: {
+        organisationId_slug: {
+          organisationId: organisation.id,
+          slug: "oak",
+        },
+      },
     });
     if (existing) return existing;
-    return { id: "dry_run_oak", slug: "oak" } as any;
+    return {
+      id: "dry_run_oak",
+      slug: "oak",
+      organisationId: organisation.id,
+      organisation,
+    } as any;
   }
 
   return prisma.curriculumSource.upsert({
-    where: { slug: "oak" },
+    where: {
+      organisationId_slug: {
+        organisationId: organisation.id,
+        slug: "oak",
+      },
+    },
     update: {
       name: "Oak National Academy",
       url: "https://open-api.thenational.academy",
@@ -396,6 +564,7 @@ export async function ensureOakSource() {
       isActive: true,
     },
     create: {
+      organisationId: organisation.id,
       name: "Oak National Academy",
       slug: "oak",
       url: "https://open-api.thenational.academy",
@@ -405,12 +574,13 @@ export async function ensureOakSource() {
   });
 }
 
-export async function syncOakForStems() {
+export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
   const t0 = now();
   const source = await ensureOakSource();
+  const wantedSubjects = resolveWantedOakSubjects(options?.subjectSlugs);
 
   console.log(
-    `[oak] sync start sourceId=${source.id} logEvery=${LOG_EVERY} debug=${DEBUG} dryRun=${DRY_RUN} transcriptChunkChars=${TRANSCRIPT_CHUNK_CHARS} transcriptMaxChunks=${TRANSCRIPT_MAX_CHUNKS}`,
+    `[oak] sync start sourceId=${source.id} subjects=${wantedSubjects.join(",")} logEvery=${LOG_EVERY} debug=${DEBUG} dryRun=${DRY_RUN} transcriptChunkChars=${TRANSCRIPT_CHUNK_CHARS} transcriptMaxChunks=${TRANSCRIPT_MAX_CHUNKS}`,
   );
 
   if (DB_LOG) {
@@ -452,15 +622,17 @@ export async function syncOakForStems() {
       `[oak] subjects fetched count=${subjects.length} in ${ms(now() - tSubjects)}`,
     );
 
-    const wanted = new Set(["maths", "science", "computing"]);
-    const stemSubjects = subjects.filter((s) => wanted.has(s.subjectSlug));
+    const wanted = new Set(wantedSubjects);
+    const curriculumSubjects = subjects.filter((s) =>
+      wanted.has(s.subjectSlug),
+    );
     console.log(
-      `[oak] STEM subjects=${stemSubjects.map((s) => s.subjectSlug).join(",")}`,
+      `[oak] subjects selected=${curriculumSubjects.map((s) => s.subjectSlug).join(",")}`,
     );
 
     let lessonCounter = 0;
 
-    for (const subj of stemSubjects) {
+    for (const subj of curriculumSubjects) {
       stats.subjects++;
       console.log(
         `\n[oak] SUBJECT ${subj.subjectSlug} sequences=${subj.sequenceSlugs.length}`,
@@ -566,8 +738,14 @@ export async function syncOakForStems() {
                 stats.skippedWritesDryRun++;
               } else {
                 await prisma.curriculumObjective.upsert({
-                  where: { code },
+                  where: {
+                    organisationId_code: {
+                      organisationId: source.organisationId,
+                      code,
+                    },
+                  },
                   update: {
+                    organisationId: source.organisationId,
                     subject: subjectEnum,
                     keyStage: keyStageEnum,
                     yearGroup: yr,
@@ -584,6 +762,7 @@ export async function syncOakForStems() {
                     sourceId: source.id,
                   },
                   create: {
+                    organisationId: source.organisationId,
                     code,
                     subject: subjectEnum,
                     keyStage: keyStageEnum,
@@ -689,6 +868,16 @@ export async function syncOakForStems() {
                 idSuffix?: string,
               ) => {
                 const id = chunkId(lessonSlug, type, idSuffix);
+                const contentHash = sha256(
+                  JSON.stringify({
+                    organisationId: source.organisationId,
+                    sourceId: source.id,
+                    lessonSlug,
+                    type,
+                    idSuffix: idSuffix ?? null,
+                    content,
+                  }),
+                );
 
                 if (DRY_RUN) {
                   stats.skippedWritesDryRun++;
@@ -699,6 +888,7 @@ export async function syncOakForStems() {
                 await prisma.contentChunk.upsert({
                   where: { id },
                   update: {
+                    organisationId: source.organisationId,
                     sourceId: source.id,
                     subject: lessonSubject,
                     keyStage: lessonKs,
@@ -708,12 +898,14 @@ export async function syncOakForStems() {
                     type,
                     difficulty,
                     content,
+                    contentSha256: contentHash,
                     citations: Array.isArray(citations) ? citations : [],
                     tags: Array.isArray(tags) ? tags : [],
                     isActive: true,
                   },
                   create: {
                     id,
+                    organisationId: source.organisationId,
                     sourceId: source.id,
                     subject: lessonSubject,
                     keyStage: lessonKs,
@@ -723,6 +915,7 @@ export async function syncOakForStems() {
                     type,
                     difficulty,
                     content,
+                    contentSha256: contentHash,
                     citations: Array.isArray(citations) ? citations : [],
                     tags: Array.isArray(tags) ? tags : [],
                     isActive: true,
@@ -859,3 +1052,5 @@ export async function syncOakForStems() {
     clearInterval(hb);
   }
 }
+
+export const syncOakForStems = syncOakCurriculum;

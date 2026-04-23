@@ -1,0 +1,30 @@
+@media print {
+  body {
+    background: white;
+  }
+
+  .app-shell {
+    padding: 0;
+  }
+
+  .hero-card,
+  .no-print {
+    display: none !important;
+  }
+
+  .report-page {
+    border: 0;
+    box-shadow: none;
+    border-radius: 0;
+    padding: 0;
+  }
+
+  .report-card {
+    break-inside: avoid;
+  }
+
+  @page {
+    size: A4;
+    margin: 16mm;
+  }
+}

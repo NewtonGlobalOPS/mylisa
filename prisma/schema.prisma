@@ -1,18 +1,13 @@
 // prisma/schema.prisma
-// Foundation schema (Option 2: replicate curriculum per Organisation)
-// Prisma v7+ (datasource url moved to prisma.config.ts)
-// Runtime DB connection is provided via PrismaClient({ adapter }) in your Node code.
+// Production-safe schema
+// Strand-safe, additive-first revision
 //
-// NOTES:
-// - This schema is the authoritative foundation for multi-tenant RAG with pgvector-first.
-// - Curriculum content is ALWAYS org-owned (replicated per org). No global/public curriculum rows.
-// - Embeddings are stored via Embedding.vector (pgvector column created via SQL migration).
-// - RLS-ready: orgId is required on all tenant-owned entities used in retrieval.
-//
-// After migrating, you will also run SQL migrations:
-//   CREATE EXTENSION IF NOT EXISTS vector;
-//   ALTER TABLE "Embedding" ADD COLUMN "vector" vector(<DIMS>);
-//   CREATE INDEX ... USING hnsw ... (after backfill)
+// IMPORTANT:
+// - Existing string strand fields are retained to avoid data loss.
+// - New first-class CurriculumStrand model added.
+// - New nullable strandId FKs added for safe backfill.
+// - Attempt / AttemptItem get strand snapshots for history stability.
+// - No destructive changes in this revision.
 
 generator client {
   provider = "prisma-client-js"
@@ -22,11 +17,44 @@ datasource db {
   provider = "postgresql"
 }
 
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Enums
-// ────────────────────────────────────────────────────────────────────────────────
-//
+enum TaskType {
+  CHAT
+  CHECK_WORK
+  MICRO_LESSON
+  MINI_QUIZ
+  PRACTICE_SET
+  ASSESSMENT
+}
+
+enum CanonicalItemType {
+  EQUATION
+  MISSING_NUMBER
+  COMPARISON
+  ONE_MORE_ONE_LESS
+  NUMBER_SEQUENCE
+  NUMBER_LINE
+  MEASUREMENT_COMPARE
+  FRACTION_OF_QUANTITY
+  TURN_DIRECTION
+  TIME_MATCH
+  DATE_SEQUENCE
+  COIN_VALUE
+  SHAPE_NAME
+}
+
+enum CanonicalOperator {
+  ADD
+  SUBTRACT
+  MULTIPLY
+  DIVIDE
+  EQUALS
+}
+
+enum CanonicalItemStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
 
 enum ScienceDomain {
   BIOLOGY
@@ -46,6 +74,7 @@ enum Subject {
   MATHS
   SCIENCE
   COMPUTING
+  ENGLISH
 }
 
 enum KeyStage {
@@ -70,14 +99,6 @@ enum Verbosity {
 enum StepSize {
   SMALL
   NORMAL
-}
-
-enum TaskType {
-  CHAT
-  CHECK_WORK
-  MICRO_LESSON
-  MINI_QUIZ
-  PRACTICE_SET
 }
 
 enum AssessmentContext {
@@ -141,6 +162,10 @@ enum ConsentState {
   DENIED
 }
 
+enum IntegrationSource {
+  NEWTONCENTRE
+}
+
 enum VisibilityScope {
   ORG_ONLY
   COHORT
@@ -173,12 +198,6 @@ enum StudentVectorType {
   STRENGTHS
 }
 
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Core Identity
-// ────────────────────────────────────────────────────────────────────────────────
-//
-
 model Organisation {
   id       String  @id @default(cuid())
   name     String
@@ -191,6 +210,7 @@ model Organisation {
   users                User[]
   students             Student[]
   curriculumSources    CurriculumSource[]
+  curriculumStrands    CurriculumStrand[]
   ragTraces            RagTrace[]
   embeddings           Embedding[]
   curriculumObjectives CurriculumObjective[]
@@ -204,6 +224,7 @@ model Organisation {
   objectiveMasteries   ObjectiveMastery[]
   studentVectors       StudentVector[]
   auditEvents          AuditEvent[]
+  canonicalQuestions   CanonicalQuestion[]
 
   @@index([isActive])
 }
@@ -222,7 +243,6 @@ model User {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  // If role == STUDENT, they will typically have a linked Student record
   student     Student?
   sessions    Session[]
   auditEvents AuditEvent[]
@@ -249,12 +269,6 @@ model Session {
   @@index([revokedAt])
 }
 
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Student + Profile (ND/NT expressed as preferences / delivery constraints)
-// ────────────────────────────────────────────────────────────────────────────────
-//
-
 model Student {
   id             String       @id @default(cuid())
   organisationId String
@@ -263,15 +277,13 @@ model Student {
   userId String @unique
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // Basic identity (keep minimal)
   firstName   String?
   lastName    String?
   dateOfBirth DateTime?
-  age         Int // 4..18 validated in app layer
+  age         Int
   keyStage    KeyStage?
   subjects    Subject[]
 
-  // Parental consent / data handling
   guardianEmail String?
   consentState  ConsentState @default(UNKNOWN)
 
@@ -281,6 +293,7 @@ model Student {
   uploads     Upload[]
   threads     TutorThread[]
   vectors     StudentVector[]
+  integrationLinks StudentIntegrationLink[]
 
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
@@ -288,6 +301,27 @@ model Student {
 
   @@index([organisationId])
   @@index([keyStage])
+}
+
+model StudentIntegrationLink {
+  id        String            @id @default(cuid())
+  studentId String
+  student   Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  source              IntegrationSource
+  externalId          String
+  externalType        String?
+  parentEmail         String?
+  ndscreenSessionId   String?
+  assessmentSessionId String?
+  syncedAt            DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([source, externalId])
+  @@index([studentId])
+  @@index([ndscreenSessionId])
 }
 
 model StudentPreference {
@@ -299,26 +333,18 @@ model StudentPreference {
   verbosity    Verbosity    @default(LOW)
   stepSize     StepSize     @default(SMALL)
 
-  // Delivery constraints / ND-friendly toggles
   lowStimulus      Boolean @default(true)
   avoidMetaphors   Boolean @default(false)
   useBullets       Boolean @default(true)
   moreExamples     Boolean @default(true)
   frequentCheckIns Boolean @default(true)
 
-  // Optional reading level hints
-  readingLevel      Int? // e.g. 1..10 (your scale)
-  attentionSpanMins Int? // e.g. 5..30
+  readingLevel      Int?
+  attentionSpanMins Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
-
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Curriculum + Content (RAG-ready; replicated per org)
-// ────────────────────────────────────────────────────────────────────────────────
-//
 
 model CurriculumSource {
   id             String       @id @default(cuid())
@@ -328,13 +354,14 @@ model CurriculumSource {
   name        String
   slug        String
   description String?
-  license     String // e.g. "OGL v3", "CC BY 4.0"
+  license     String
   attribution String?
   url         String?
 
   visibility VisibilityScope @default(ORG_ONLY)
   isActive   Boolean         @default(true)
 
+  strands    CurriculumStrand[]
   objectives CurriculumObjective[]
   chunks     ContentChunk[]
 
@@ -347,24 +374,64 @@ model CurriculumSource {
   @@index([isActive])
 }
 
+model CurriculumStrand {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  sourceId String?
+  source   CurriculumSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  subject   Subject
+  keyStage  KeyStage
+  yearGroup Int?
+
+  name String
+  slug String
+
+  description String?
+  isActive    Boolean @default(true)
+
+  objectives    CurriculumObjective[]
+  contentChunks ContentChunk[]
+  attempts      Attempt[]
+  attemptItems  AttemptItem[]
+
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  canonicalQuestions CanonicalQuestion[]
+
+  @@unique([organisationId, subject, keyStage, yearGroup, slug])
+  @@index([organisationId])
+  @@index([sourceId])
+  @@index([subject, keyStage, yearGroup])
+  @@index([slug])
+  @@index([isActive])
+}
+
 model CurriculumObjective {
   id             String       @id @default(cuid())
   organisationId String
   organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
 
-  // Stable “Objective Code” you control (great for linking mastery over time)
-  // Example: "MATH.KS2.Y4.FRACTIONS.EQUIV.001"
   code String
 
   subject   Subject
   keyStage  KeyStage
-  yearGroup Int? // KS3/KS4 might be null if you use bands
-  strand    String // e.g. "Fractions", "Number", "Forces"
-  title     String
-  statement String // objective text
-  statutory Boolean  @default(true)
+  yearGroup Int?
 
-  keywords String[] // for retrieval / routing
+  // Existing field retained for safe compatibility
+  strand String
+
+  // New first-class strand link
+  strandId  String?
+  strandRef CurriculumStrand? @relation(fields: [strandId], references: [id], onDelete: SetNull)
+
+  title     String
+  statement String
+  statutory Boolean @default(true)
+
+  keywords String[]
 
   sourceId String
   source   CurriculumSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
@@ -372,20 +439,22 @@ model CurriculumObjective {
   visibility VisibilityScope @default(ORG_ONLY)
   isActive   Boolean         @default(true)
 
-  chunks       ContentChunk[]
-  mastery      ObjectiveMastery[]
-  attemptItems AttemptItem[]
-
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  chunks        ContentChunk[]
+  mastery       ObjectiveMastery[]
+  attemptItems  AttemptItem[]
   homeworkLinks HomeworkLink[]
   attempts      Attempt[]
+
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  canonicalQuestions CanonicalQuestion[]
 
   @@unique([organisationId, code])
   @@index([organisationId])
   @@index([subject, keyStage])
   @@index([keyStage, yearGroup])
   @@index([strand])
+  @@index([strandId])
   @@index([visibility])
   @@index([sourceId])
   @@index([isActive])
@@ -405,44 +474,46 @@ model ContentChunk {
   subject   Subject
   keyStage  KeyStage
   yearGroup Int?
-  strand    String?
+
+  // Existing field retained
+  strand String?
+
+  // New first-class strand link
+  strandId  String?
+  strandRef CurriculumStrand? @relation(fields: [strandId], references: [id], onDelete: SetNull)
 
   type       ChunkType
   difficulty DifficultyBand @default(MEDIUM)
 
-  // RAG storage
   content    String
   tokenCount Int?
 
-  // Deterministic dedupe/cache key for this exact content payload
-  // (compute in app: sha256(normalizedContent))
-  contentSha256 String @unique
-
-  // Citation anchors (e.g., "oak:lesson:xyz#p3", "pdf:p2:box(…)")
-  citations String[]
-  tags      String[]
+  contentSha256 String   @unique
+  citations     String[]
+  tags          String[]
 
   visibility VisibilityScope @default(ORG_ONLY)
   isActive   Boolean         @default(true)
 
-  // Science domain tagging
   scienceDomain           ScienceDomain?
   scienceDomainConfidence Float?
   scienceDomainModel      String?
   scienceDomainTaggedAt   DateTime?
 
-  // Embedding pointer (pgvector stored on Embedding.vector)
   embeddingId String?
   embedding   Embedding? @relation(fields: [embeddingId], references: [id], onDelete: SetNull)
 
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   homeworkLinks HomeworkLink[]
 
   @@index([organisationId])
   @@index([sourceId])
   @@index([objectiveId])
   @@index([subject, keyStage, yearGroup])
+  @@index([strand])
+  @@index([strandId])
   @@index([type])
   @@index([difficulty])
   @@index([visibility])
@@ -455,10 +526,10 @@ model ContentChunk {
 model CommandWord {
   id         String   @id @default(cuid())
   subject    Subject
-  word       String // "explain", "calculate", "compare"
+  word       String
   definition String
-  scaffolds  String[] // bullet templates / structure prompts
-  examples   String[] // short examples
+  scaffolds  String[]
+  examples   String[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -466,12 +537,6 @@ model CommandWord {
   @@unique([subject, word])
   @@index([word])
 }
-
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Embeddings (pgvector-first)
-// ────────────────────────────────────────────────────────────────────────────────
-//
 
 model Embedding {
   id             String       @id @default(cuid())
@@ -483,17 +548,11 @@ model Embedding {
   status EmbeddingStatus @default(PENDING)
   error  String?
 
-  // Content-addressable cache key for this embedding input (sha256 of embedding input text + any recipe params)
   inputSha256 String @unique
-
-  // pgvector column added by SQL migration:
-  //   ALTER TABLE "Embedding" ADD COLUMN "vector" vector(<DIMS>);
-  // vector column is managed manually via SQL (pgvector); not represented in Prisma schema
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Backrefs
   contentChunks  ContentChunk[]
   uploadChunks   UploadChunk[]
   studentVectors StudentVector[]
@@ -503,12 +562,6 @@ model Embedding {
   @@index([model])
   @@index([dims])
 }
-
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Uploads + UploadChunks (homework correlation)
-// ────────────────────────────────────────────────────────────────────────────────
-//
 
 model Upload {
   id             String       @id @default(cuid())
@@ -524,17 +577,15 @@ model Upload {
   sizeBytes    BigInt
 
   storage        StorageProvider @default(LOCAL)
-  storageKey     String // path/key in storage provider
+  storageKey     String
   checksumSha256 String?
 
-  // Optional extracted text (OCR / parsing)
   extractedText String?
   ocrConfidence Float?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relations to attempts/threads
   attemptId String?
   attempt   Attempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
 
@@ -564,11 +615,9 @@ model UploadChunk {
   content    String
   tokenCount Int?
 
-  // Citation anchors for the original uploaded document
   pageNumber Int?
-  locator    Json? // bbox, offsets, etc.
+  locator    Json?
 
-  // Dedupe/cache key
   contentSha256 String
 
   embeddingId String?
@@ -591,7 +640,6 @@ model HomeworkLink {
   uploadId String
   upload   Upload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
 
-  // Links to curriculum
   objectiveId String?
   objective   CurriculumObjective? @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
 
@@ -610,12 +658,6 @@ model HomeworkLink {
   @@index([linkType])
 }
 
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Tutor Threads (chat history + agentic tasks)
-// ────────────────────────────────────────────────────────────────────────────────
-//
-
 model TutorThread {
   id             String       @id @default(cuid())
   organisationId String
@@ -628,7 +670,6 @@ model TutorThread {
   taskType          TaskType          @default(CHAT)
   assessmentContext AssessmentContext @default(UNKNOWN)
 
-  // Lightweight “state” blob for agent (kept small; don’t store entire prompts)
   state Json?
 
   messages  TutorMessage[]
@@ -650,7 +691,7 @@ model TutorMessage {
   threadId String
   thread   TutorThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
-  role    String // "user" | "assistant" | "system" (app-level)
+  role    String
   content String
   meta    Json?
 
@@ -658,12 +699,6 @@ model TutorMessage {
 
   @@index([threadId, createdAt])
 }
-
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Attempts + Items (mini quizzes, check-work scoring, micro-lessons)
-// ────────────────────────────────────────────────────────────────────────────────
-//
 
 model Attempt {
   id             String       @id @default(cuid())
@@ -677,23 +712,24 @@ model Attempt {
   taskType          TaskType
   assessmentContext AssessmentContext @default(UNKNOWN)
 
-  // What this attempt was about
   primaryObjectiveId String?
   primaryObjective   CurriculumObjective? @relation(fields: [primaryObjectiveId], references: [id], onDelete: SetNull)
 
-  // Optional link to tutor thread
   threadId String?
   thread   TutorThread? @relation(fields: [threadId], references: [id], onDelete: SetNull)
 
+  // New strand tracking for historical stability
+  strandId    String?
+  strandRef   CurriculumStrand? @relation(fields: [strandId], references: [id], onDelete: SetNull)
+  strandLabel String?
+
   status AttemptStatus @default(STARTED)
 
-  // Scoring
-  score         Float? // 0..1 (computed)
+  score         Float?
   helpUsed      HelpLevel @default(NONE)
   timeOnTaskSec Int?
 
-  // Signals
-  frustration String? // "low" | "medium" | "high" (computed from behaviour)
+  frustration String?
   notes       Json?
 
   items   AttemptItem[]
@@ -709,6 +745,7 @@ model Attempt {
   @@index([taskType])
   @@index([primaryObjectiveId])
   @@index([threadId])
+  @@index([strandId])
   @@index([status])
 }
 
@@ -723,32 +760,40 @@ model AttemptItem {
   objectiveId String?
   objective   CurriculumObjective? @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
 
-  // Question / rubric element (store prompt fragment or key)
+  // Strand snapshot for historical stability
+  strandId    String?
+  strandRef   CurriculumStrand? @relation(fields: [strandId], references: [id], onDelete: SetNull)
+  strandLabel String?
+
+  // Canonical question linkage + immutable maths snapshot
+  canonicalQuestionId String?
+  canonicalQuestion   CanonicalQuestion? @relation(fields: [canonicalQuestionId], references: [id], onDelete: SetNull)
+
+  canonicalEquation String?
+  canonicalOperator CanonicalOperator?
+  lhsA              Int?
+  lhsB              Int?
+  rhs               Int?
+
   prompt     String
-  type       String // "mcq" | "short" | "step" | "rubric"
+  type       String
   difficulty DifficultyBand @default(MEDIUM)
 
-  // Student response
   response  String?
   isCorrect Boolean?
-  score     Float? // 0..1 per item
+  score     Float?
 
-  // Error tagging for weakness profile
   errorTags          String[]
-  misconceptionCodes String[] // your controlled codes
+  misconceptionCodes String[]
 
   createdAt DateTime @default(now())
 
   @@index([organisationId])
   @@index([attemptId])
   @@index([objectiveId])
+  @@index([strandId])
+  @@index([canonicalQuestionId])
 }
-
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Mastery model (weakness profile)
-// ────────────────────────────────────────────────────────────────────────────────
-//
 
 model ObjectiveMastery {
   id             String       @id @default(cuid())
@@ -761,13 +806,11 @@ model ObjectiveMastery {
   objectiveId String
   objective   CurriculumObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
 
-  // Computed/updated over time
-  masteryScore    Float        @default(0.5) // 0..1
-  confidenceScore Float        @default(0.5) // 0..1
-  stabilityScore  Float        @default(0.5) // 0..1 (variance proxy)
+  masteryScore    Float        @default(0.5)
+  confidenceScore Float        @default(0.5)
+  stabilityScore  Float        @default(0.5)
   trend           MasteryTrend @default(FLAT)
 
-  // Summaries
   commonErrorTags String[]
   lastSeenAt      DateTime?
   attemptsCount   Int       @default(0)
@@ -782,12 +825,6 @@ model ObjectiveMastery {
   @@index([objectiveId])
   @@index([masteryScore])
 }
-
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Student Vectors (future adaptive retrieval)
-// ────────────────────────────────────────────────────────────────────────────────
-//
 
 model StudentVector {
   id             String       @id @default(cuid())
@@ -811,12 +848,6 @@ model StudentVector {
   @@index([type])
 }
 
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// RAG Trace (auditability for retrieval + generation)
-// ────────────────────────────────────────────────────────────────────────────────
-//
-
 model RagTrace {
   id             String       @id @default(cuid())
   organisationId String
@@ -830,14 +861,9 @@ model RagTrace {
 
   lane RagLane
 
-  // Store hashes rather than raw text by default (privacy + size)
   queryTextHash String
-
-  // Filters applied (scienceDomain, keyStage, subject, etc.)
-  filters Json?
-
-  // Retrieved chunk IDs + scores (JSON array)
-  retrieved Json?
+  filters       Json?
+  retrieved     Json?
 
   promptHash String?
   outputHash String?
@@ -851,12 +877,6 @@ model RagTrace {
   @@index([lane])
 }
 
-//
-// ────────────────────────────────────────────────────────────────────────────────
-// Auditing (production-grade hygiene)
-// ────────────────────────────────────────────────────────────────────────────────
-//
-
 model AuditEvent {
   id             String        @id @default(cuid())
   organisationId String?
@@ -865,8 +885,8 @@ model AuditEvent {
   userId String?
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  action     String // e.g. "AUTH_LOGIN", "UPLOAD_CREATE", "ATTEMPT_SUBMIT"
-  entityType String? // e.g. "Student", "Attempt", "Upload"
+  action     String
+  entityType String?
   entityId   String?
   ip         String?
   userAgent  String?
@@ -878,4 +898,51 @@ model AuditEvent {
   @@index([userId, createdAt])
   @@index([action, createdAt])
   @@index([entityType, entityId])
+}
+
+model CanonicalQuestion {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  objectiveId String
+  objective   CurriculumObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+
+  strandId    String?
+  strandRef   CurriculumStrand? @relation(fields: [strandId], references: [id], onDelete: SetNull)
+  strandLabel String?
+
+  itemType CanonicalItemType  @default(EQUATION)
+  operator CanonicalOperator?
+
+  lhsA Int?
+  lhsB Int?
+  rhs  Int?
+
+  equation    String?
+  promptText  String
+  answerText  String
+  contentJson Json?
+
+  sequence   Int
+  difficulty DifficultyBand @default(EASY)
+
+  isGenerated      Boolean @default(true)
+  generatorVersion String?
+  generatorMeta    Json?
+
+  status CanonicalItemStatus @default(ACTIVE)
+
+  contentSha256 String @unique
+
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  attemptItems AttemptItem[]
+
+  @@unique([objectiveId, sequence])
+  @@index([organisationId])
+  @@index([objectiveId])
+  @@index([strandId])
+  @@index([itemType])
+  @@index([status])
 }

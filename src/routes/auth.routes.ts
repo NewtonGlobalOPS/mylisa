@@ -11,7 +11,9 @@ const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
   age: z.number().int().min(4).max(18),
-  subjects: z.array(z.enum(["MATHS", "SCIENCE", "COMPUTING"])).min(1),
+  subjects: z.array(z.enum(["MATHS", "SCIENCE", "COMPUTING", "ENGLISH"])).min(
+    1,
+  ),
   firstName: z.string().optional(),
   lastName: z.string().optional(),
 });
@@ -57,43 +59,6 @@ authRouter.post("/register", async (req, res) => {
       },
     },
     include: { student: true },
-  });
-
-  const token = jwt.sign(
-    { sub: user.id, role: user.role, email: user.email },
-    env.JWT_SECRET,
-    { expiresIn: "7d" },
-  );
-
-  res.json({
-    token,
-    userId: user.id,
-    studentId: user.student?.id,
-  });
-});
-
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string(),
-});
-
-authRouter.post("/login", async (req, res) => {
-  const body = loginSchema.parse(req.body);
-  const email = body.email.toLowerCase();
-
-  const user = await prisma.user.findUnique({
-    where: { email },
-    include: { student: true },
-  });
-
-  if (!user) return res.status(401).json({ error: "Invalid credentials" });
-
-  const ok = await bcrypt.compare(body.password, user.passwordHash);
-  if (!ok) return res.status(401).json({ error: "Invalid credentials" });
-
-  await prisma.user.update({
-    where: { id: user.id },
-    data: { lastLoginAt: new Date() },
   });
 
   const token = jwt.sign(
