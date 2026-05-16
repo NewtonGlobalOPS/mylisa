@@ -1,0 +1,1 @@
+ALTER TYPE "IntegrationSource" ADD VALUE IF NOT EXISTS 'NDSCREEN';

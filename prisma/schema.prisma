@@ -164,6 +164,7 @@ enum ConsentState {
 
 enum IntegrationSource {
   NEWTONCENTRE
+  NDSCREEN
 }
 
 enum VisibilityScope {
@@ -223,6 +224,12 @@ model Organisation {
   attemptItems         AttemptItem[]
   objectiveMasteries   ObjectiveMastery[]
   studentVectors       StudentVector[]
+  wrapperVectors       WrapperVector[]
+  coursePlans          CoursePlan[]
+  coursePlanItems      CoursePlanItem[]
+  lessonSessions       LessonSession[]
+  lessonParticipants   LessonSessionParticipant[]
+  lessonEvents         LessonSessionEvent[]
   auditEvents          AuditEvent[]
   canonicalQuestions   CanonicalQuestion[]
 
@@ -243,9 +250,11 @@ model User {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  student     Student?
-  sessions    Session[]
-  auditEvents AuditEvent[]
+  student           Student?
+  sessions          Session[]
+  ledLessonSessions LessonSession[] @relation("LessonSessionTutor")
+  lessonEvents      LessonSessionEvent[]
+  auditEvents       AuditEvent[]
 
   @@index([organisationId])
   @@index([role])
@@ -281,6 +290,7 @@ model Student {
   lastName    String?
   dateOfBirth DateTime?
   age         Int
+  schoolYear  Int?
   keyStage    KeyStage?
   subjects    Subject[]
 
@@ -292,8 +302,13 @@ model Student {
   attempts    Attempt[]
   uploads     Upload[]
   threads     TutorThread[]
-  vectors     StudentVector[]
-  integrationLinks StudentIntegrationLink[]
+  vectors            StudentVector[]
+  wrapperVectors     WrapperVector[]
+  integrationLinks   StudentIntegrationLink[]
+  coursePlans        CoursePlan[]
+  coursePlanItems    CoursePlanItem[]
+  lessonParticipants LessonSessionParticipant[]
+  lessonEvents       LessonSessionEvent[]
 
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
@@ -301,6 +316,7 @@ model Student {
 
   @@index([organisationId])
   @@index([keyStage])
+  @@index([schoolYear])
 }
 
 model StudentIntegrationLink {
@@ -448,6 +464,9 @@ model CurriculumObjective {
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   canonicalQuestions CanonicalQuestion[]
+  wrapperVectors     WrapperVector[]
+  coursePlanItems    CoursePlanItem[]
+  lessonSessions     LessonSession[]
 
   @@unique([organisationId, code])
   @@index([organisationId])
@@ -848,6 +867,196 @@ model StudentVector {
   @@index([type])
 }
 
+model WrapperVector {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  objectiveId String?
+  objective   CurriculumObjective? @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
+
+  title   String
+  content String
+  scope   String   @default("GENERAL")
+  source  String   @default("MANUAL")
+
+  strand    String?
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organisationId])
+  @@index([studentId])
+  @@index([objectiveId])
+  @@index([scope])
+  @@index([strand])
+  @@index([isActive])
+}
+
+
+model CoursePlan {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  subject Subject @default(MATHS)
+  title   String
+  status  String  @default("DRAFT")
+
+  assessmentSessionId String?
+  ndscreenSessionId   String?
+  sourceSummary       Json?
+
+  items CoursePlanItem[]
+  lessonSessions LessonSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organisationId])
+  @@index([studentId])
+  @@index([subject])
+  @@index([status])
+  @@index([assessmentSessionId])
+}
+
+model CoursePlanItem {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  coursePlanId String
+  coursePlan   CoursePlan @relation(fields: [coursePlanId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  objectiveId String
+  objective   CurriculumObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+
+  sequence       Int
+  strand         String
+  yearGroup      Int?
+  priorityWeight Float @default(1)
+  reason         String
+  status         String @default("PLANNED")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([coursePlanId, sequence])
+  @@index([organisationId])
+  @@index([studentId])
+  @@index([objectiveId])
+  @@index([strand])
+  @@index([status])
+}
+
+model LessonSession {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  tutorUserId String
+  tutorUser   User @relation("LessonSessionTutor", fields: [tutorUserId], references: [id], onDelete: Cascade)
+
+  coursePlanId String?
+  coursePlan   CoursePlan? @relation(fields: [coursePlanId], references: [id], onDelete: SetNull)
+
+  objectiveId String
+  objective   CurriculumObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+
+  title           String
+  status          String @default("DRAFT")
+  currentBlockKey String?
+  blockStartedAt  DateTime?
+  startedAt       DateTime?
+  endedAt         DateTime?
+
+  flowJson Json
+  tutorRuntimeJson Json?
+
+  participants LessonSessionParticipant[]
+  events       LessonSessionEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organisationId])
+  @@index([tutorUserId])
+  @@index([coursePlanId])
+  @@index([objectiveId])
+  @@index([status])
+  @@index([currentBlockKey])
+}
+
+model LessonSessionParticipant {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  lessonSessionId String
+  lessonSession   LessonSession @relation(fields: [lessonSessionId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  status             String @default("INVITED")
+  currentBlockKey    String?
+  currentQuestionId  String?
+  questionsAnswered  Int @default(0)
+  questionsCorrect   Int @default(0)
+  lastActiveAt       DateTime?
+
+  runtimeJson Json
+  progressJson Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([lessonSessionId, studentId])
+  @@index([organisationId])
+  @@index([lessonSessionId])
+  @@index([studentId])
+  @@index([status])
+  @@index([currentBlockKey])
+}
+
+model LessonSessionEvent {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  lessonSessionId String
+  lessonSession   LessonSession @relation(fields: [lessonSessionId], references: [id], onDelete: Cascade)
+
+  studentId String?
+  student   Student? @relation(fields: [studentId], references: [id], onDelete: SetNull)
+
+  userId String?
+  user   User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  type     String
+  blockKey String?
+  payload  Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([organisationId])
+  @@index([lessonSessionId, createdAt])
+  @@index([studentId, createdAt])
+  @@index([userId, createdAt])
+  @@index([type])
+}
+
 model RagTrace {
   id             String       @id @default(cuid())
   organisationId String
@@ -875,6 +1084,35 @@ model RagTrace {
   @@index([studentId, createdAt])
   @@index([threadId, createdAt])
   @@index([lane])
+}
+
+model GeneratedLessonContent {
+  id             String @id @default(cuid())
+  organisationId String
+  studentId      String?
+  objectiveId    String?
+
+  cacheKey String @unique
+  blockKey String
+  source   String
+  status   String @default("APPROVED")
+
+  contentJson   Json
+  guardrailJson Json
+  promptMeta    Json?
+
+  modelUsed String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organisationId])
+  @@index([studentId])
+  @@index([objectiveId])
+  @@index([blockKey])
+  @@index([source])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model AuditEvent {
