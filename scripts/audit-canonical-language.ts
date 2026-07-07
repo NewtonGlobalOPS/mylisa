@@ -1,45 +1,16 @@
-import { prisma } from "../src/lib/prisma";
+import { prisma } from "../src/lib/prisma.js";
 import { Subject } from "@prisma/client";
 
 type AuditHit = {
+  questionId: string;
   promptText: string;
   yearGroup: number | null;
   objectiveCode: string;
   objectiveTitle: string;
   generatorVersion: string | null;
+  issue: string;
+  details: string;
 };
-
-function isSymbolicComparison(prompt: string): boolean {
-  return /\b\d+(?:\/\d+)?\s*\?\s*\d+(?:\/\d+)?\b/i.test(prompt);
-}
-
-function isPlaceholderPrompt(prompt: string): boolean {
-  return /(?:=\s*\?\/)|(?:\bcomplete:\b.*\?)/i.test(prompt);
-}
-
-function isSyntheticChartStory(prompt: string): boolean {
-  return (
-    /a pictogram shows dogs .* cats .* birds/i.test(prompt) ||
-    /a bar chart shows red .* blue .* green/i.test(prompt)
-  );
-}
-
-function isColourCardProbabilityPrompt(prompt: string): boolean {
-  return (
-    /(red and .*blue.*counters|blue.*red.*counters)/i.test(prompt) ||
-    /card numbered 1 to 10 is picked at random/i.test(prompt) ||
-    /spinner has .* sections\. .* are red/i.test(prompt)
-  );
-}
-
-function printSection(title: string, hits: AuditHit[]) {
-  console.log(`\n${title}: ${hits.length}`);
-  for (const hit of hits.slice(0, 12)) {
-    console.log(
-      `- Y${hit.yearGroup ?? "?"} | ${hit.promptText} | ${hit.objectiveCode} | ${hit.objectiveTitle}`
-    );
-  }
-}
 
 async function main() {
   const rows = await prisma.canonicalQuestion.findMany({
@@ -51,6 +22,7 @@ async function main() {
       },
     },
     select: {
+      id: true,
       promptText: true,
       generatorVersion: true,
       objective: {
@@ -65,25 +37,79 @@ async function main() {
   });
 
   const hits: AuditHit[] = rows.map((row) => ({
+    questionId: row.id,
     promptText: row.promptText,
     yearGroup: row.objective.yearGroup,
     objectiveCode: row.objective.code,
     objectiveTitle: row.objective.title,
     generatorVersion: row.generatorVersion ?? null,
+    issue: "",
+    details: "",
   }));
 
-  const symbolicComparison = hits.filter((hit) => isSymbolicComparison(hit.promptText));
-  const placeholderPrompts = hits.filter((hit) => isPlaceholderPrompt(hit.promptText));
-  const syntheticChartStories = hits.filter((hit) => isSyntheticChartStory(hit.promptText));
-  const colourCardProbabilityPrompts = hits.filter((hit) =>
-    isColourCardProbabilityPrompt(hit.promptText)
-  );
+  const findings = hits.flatMap((hit) => {
+    const prompt = hit.promptText.trim();
+    const out: AuditHit[] = [];
 
-  console.log(`Audited ${hits.length} active maths canonical questions.`);
-  printSection("Symbolic comparison prompts", symbolicComparison);
-  printSection("Placeholder prompts", placeholderPrompts);
-  printSection("Synthetic repeated chart-story prompts", syntheticChartStories);
-  printSection("Colour/card probability prompts", colourCardProbabilityPrompts);
+    if (/\ba (equilateral|isosceles|octagon)\b/i.test(prompt)) {
+      out.push({
+        ...hit,
+        issue: "ARTICLE_MISMATCH",
+        details: "Indefinite article should be 'an' before this shape name.",
+      });
+    }
+
+    if (/(?:=\s*\?\/)|(?:\bcomplete:\b.*\?)/i.test(prompt)) {
+      out.push({
+        ...hit,
+        issue: "PLACEHOLDER_PROMPT",
+        details: "Prompt still contains placeholder-style wording.",
+      });
+    }
+
+    if (
+      /a pictogram shows dogs .* cats .* birds/i.test(prompt) ||
+      /a bar chart shows red .* blue .* green/i.test(prompt)
+    ) {
+      out.push({
+        ...hit,
+        issue: "SYNTHETIC_STORY",
+        details: "Prompt uses an overly synthetic repeated story shell.",
+      });
+    }
+
+    if (
+      /(red and .*blue.*counters|blue.*red.*counters)/i.test(prompt) ||
+      /card numbered 1 to 10 is picked at random/i.test(prompt) ||
+      /spinner has .* sections\. .* are red/i.test(prompt)
+    ) {
+      out.push({
+        ...hit,
+        issue: "STALE_PROBABILITY_WORDING",
+        details: "Prompt uses a legacy probability wording shell flagged for review.",
+      });
+    }
+
+    return out;
+  });
+
+  const summary = findings.reduce<Record<string, number>>((acc, finding) => {
+    acc[finding.issue] = (acc[finding.issue] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  console.log(
+    JSON.stringify(
+      {
+        auditedActiveQuestions: hits.length,
+        flaggedFindings: findings.length,
+        summary,
+        findings,
+      },
+      null,
+      2
+    )
+  );
 }
 
 main()

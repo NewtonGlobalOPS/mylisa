@@ -1,17 +1,20 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import Layout from "../components/Layout";
 import { getLessonRuntimeByObjective } from "../api/assessmentApi";
 import type { LessonRuntimeResponse } from "../types/assessment";
 import { loadState } from "../utils/storage";
+import { formatOakText, getOakQuestionImage, getSingleChoiceOptions } from "../utils/oakQuestion";
 
 export default function LessonPage() {
   const navigate = useNavigate();
   const { objectiveId = "" } = useParams();
+  const [searchParams] = useSearchParams();
   const state = loadState();
   const studentId = state.student?.studentId ?? "";
   const assessmentSessionId = state.sessionId || undefined;
   const ndscreenSessionId = state.ndscreenSessionId?.trim() || undefined;
+  const selectedChunkIdsParam = searchParams.get("selectedChunkIds")?.trim() ?? "";
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -33,6 +36,12 @@ export default function LessonPage() {
           studentId,
           assessmentSessionId,
           ndscreenSessionId,
+          selectedChunkIds: selectedChunkIdsParam
+            ? selectedChunkIdsParam
+                .split(",")
+                .map((item) => item.trim())
+                .filter(Boolean)
+            : undefined,
         });
         setRuntime(next);
       } catch (err) {
@@ -43,11 +52,18 @@ export default function LessonPage() {
     }
 
     void loadRuntime();
-  }, [assessmentSessionId, ndscreenSessionId, navigate, objectiveId, studentId]);
+  }, [
+    assessmentSessionId,
+    ndscreenSessionId,
+    navigate,
+    objectiveId,
+    selectedChunkIdsParam,
+    studentId,
+  ]);
 
   const title = runtime?.delivery.curriculum.objective.title ?? "Lesson preview";
   const subtitle = runtime
-    ? `${runtime.delivery.child.displayName} sees the same canonical maths as every learner, with a child-specific wrapper around it.`
+    ? `${runtime.delivery.child.displayName} sees the same canonical maths as every learner, with a child-specific wrapper around it and a 50-minute blended lesson structure.`
     : "Loading lesson runtime package.";
 
   return (
@@ -60,6 +76,16 @@ export default function LessonPage() {
         <div className="button-row">
           <button className="btn btn-secondary" onClick={() => navigate("/report")}>
             Back to report
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() =>
+              navigate(
+                `/lesson-builder?objectiveId=${encodeURIComponent(objectiveId)}`
+              )
+            }
+          >
+            Open builder
           </button>
         </div>
       </div>
@@ -141,19 +167,63 @@ export default function LessonPage() {
           <div style={{ height: 20 }} />
 
           <div className="card">
-            <h2>Lesson flow</h2>
+            <h2>50-minute lesson flow</h2>
             <div className="lesson-flow">
-              {runtime.screenPayload.lessonFlow.sections.map((section) => (
+              {runtime.screenPayload.lessonFlow.sessionBlocks.map((section) => (
                 <div key={section.key} className="lesson-step">
                   <div className="lesson-step-head">
                     <strong>{section.title}</strong>
                     <span className="pill">
-                      {section.canonicalQuestionIds.length} canonical
+                      {section.durationMinutes} mins
                     </span>
                   </div>
                   <p className="meta">{section.purpose}</p>
+                  <p className="meta">
+                    {section.audience === "TUTOR_SCREEN" ? "Tutor large screen" : "Student personalised session"} · {section.mode.replaceAll("_", " ")}
+                  </p>
                 </div>
               ))}
+            </div>
+          </div>
+
+          <div style={{ height: 20 }} />
+
+          <div className="grid grid-2">
+            <div className="card">
+              <h2>Wrapper vectors in play</h2>
+              <div className="profile-stack">
+                {runtime.screenPayload.wrapperVectors.map((vector) => (
+                  <div key={vector.id} className="profile-item">
+                    <div className="profile-item-head">
+                      <strong>{vector.title}</strong>
+                      <span className="pill">{vector.scope}</span>
+                    </div>
+                    <p className="meta">{vector.content}</p>
+                  </div>
+                ))}
+                {!runtime.screenPayload.wrapperVectors.length ? (
+                  <p className="meta">
+                    No wrapper vectors are active, so the lesson relies on ndscreen and assessment signals only.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="card">
+              <h2>Personalised question rounds</h2>
+              <div className="profile-stack">
+                {runtime.screenPayload.personalisedQuestionRounds.map((round) => (
+                  <div key={round.key} className="profile-item">
+                    <div className="profile-item-head">
+                      <strong>{round.title}</strong>
+                      <span className="pill">{round.durationMinutes} mins</span>
+                    </div>
+                    <p className="meta">
+                      {round.purpose} {round.questions.length} questions selected.
+                    </p>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -171,7 +241,18 @@ export default function LessonPage() {
                     <span className="pill">{card.title}</span>
                     <span className="pill">{card.difficulty}</span>
                   </div>
-                  <div className="lesson-question">{card.promptText}</div>
+                  <div className="lesson-question">{formatOakText(card.promptText)}</div>
+                  {getOakQuestionImage(card) ? (
+                    <figure className="question-stimulus question-stimulus-live">
+                      <img
+                        src={getOakQuestionImage(card)!.url}
+                        width={getOakQuestionImage(card)!.width}
+                        height={getOakQuestionImage(card)!.height}
+                        alt={getOakQuestionImage(card)!.alt}
+                        loading="eager"
+                      />
+                    </figure>
+                  ) : null}
                   <p className="meta">
                     Expected answer: <strong>{card.answerText}</strong>
                   </p>
@@ -183,7 +264,63 @@ export default function LessonPage() {
           <div style={{ height: 20 }} />
 
           <div className="card">
+            <h2>Vectored student questions</h2>
+            <div className="profile-stack">
+              {runtime.screenPayload.personalisedQuestionRounds.map((round) => (
+                <div key={round.key} className="profile-item">
+                  <div className="profile-item-head">
+                    <strong>{round.title}</strong>
+                    <span className="pill">{round.questions.length} questions</span>
+                  </div>
+                  <p className="meta" style={{ marginBottom: 10 }}>{round.purpose}</p>
+                  <div className="lesson-cards">
+                    {round.questions.map((question) => (
+                      <div key={question.id} className="lesson-card">
+                        <div className="lesson-card-top">
+                          <span className="pill">{question.objectiveCode}</span>
+                          <span className="pill">{question.difficulty}</span>
+                        </div>
+                        <div className="lesson-question">{formatOakText(question.promptText)}</div>
+                        {getOakQuestionImage(question) ? (
+                          <figure className="question-stimulus question-stimulus-live">
+                            <img
+                              src={getOakQuestionImage(question)!.url}
+                              width={getOakQuestionImage(question)!.width}
+                              height={getOakQuestionImage(question)!.height}
+                              alt={getOakQuestionImage(question)!.alt}
+                              loading="eager"
+                            />
+                          </figure>
+                        ) : null}
+                        {getSingleChoiceOptions(question).length ? (
+                          <div className="answer-choice-grid" style={{ marginBottom: 12 }}>
+                            {getSingleChoiceOptions(question).map((choice) => (
+                              <span key={choice} className="pill">{choice}</span>
+                            ))}
+                          </div>
+                        ) : null}
+                        <p className="meta">
+                          {question.strand}
+                          {question.yearGroup != null ? ` · Year ${question.yearGroup}` : ""}
+                        </p>
+                        <p className="meta">{question.rationale}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ height: 20 }} />
+
+          <div className="card">
             <h2>Oak support content</h2>
+            <p className="meta" style={{ marginBottom: 14 }}>
+              {runtime.screenPayload.supportSelection.isCustomSelection
+                ? "This preview is using a tutor-custom chunk selection from the lesson builder."
+                : "This preview is using the automatic chunk selection produced by the lesson builder."}
+            </p>
             <div className="lesson-support-groups">
               {runtime.screenPayload.supportCards.map((group) => (
                 <div key={group.type} className="lesson-support-group">
@@ -194,11 +331,17 @@ export default function LessonPage() {
                   <div className="lesson-support-items">
                     {group.items.map((item) => (
                       <div key={item.id} className="lesson-support-item">
+                        <p className="meta">
+                          {item.objectiveCode ?? "Shared support"}
+                          {item.yearGroup != null ? ` · Year ${item.yearGroup}` : ""}
+                          {item.strand ? ` · ${item.strand}` : ""}
+                        </p>
                         {item.excerpt.map((line, index) => (
                           <p key={`${item.id}-${index}`} className="meta">
                             {line}
                           </p>
                         ))}
+                        <p className="meta">{item.matchReason}</p>
                       </div>
                     ))}
                   </div>

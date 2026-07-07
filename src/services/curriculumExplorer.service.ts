@@ -1,11 +1,20 @@
 import type { KeyStage, Subject } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 
+export type MathsObjectiveDomain =
+  | "NUMBER"
+  | "ALGEBRA"
+  | "GEOMETRY"
+  | "DATA"
+  | "RATIO"
+  | "PROBABILITY";
+
 type ExplorerFilterInput = {
   organisationSlug?: string;
   subject?: Subject;
   keyStage?: KeyStage;
   yearGroup?: number;
+  domain?: MathsObjectiveDomain;
   strand?: string;
   search?: string;
   hasContent?: boolean;
@@ -18,6 +27,7 @@ type ObjectiveWhereInput = {
   subject?: Subject;
   keyStage?: KeyStage;
   yearGroup?: number;
+  domain?: MathsObjectiveDomain;
   strand?: string;
   search?: string;
   hasContent?: boolean;
@@ -32,6 +42,110 @@ function normalizeSearch(value: string | undefined): string | undefined {
 function normalizeOptionalText(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function strandContains(value: string) {
+  return {
+    strand: {
+      contains: value,
+      mode: "insensitive" as const,
+    },
+  };
+}
+
+function buildDomainClause(domain: MathsObjectiveDomain | undefined) {
+  switch (domain) {
+    case "ALGEBRA":
+      return {
+        OR: [
+          strandContains("algebra"),
+          strandContains("expression"),
+          strandContains("equation"),
+          strandContains("formula"),
+          strandContains("sequence"),
+          strandContains("function"),
+          strandContains("graph"),
+          strandContains("linear"),
+          strandContains("inequal"),
+          strandContains("iteration"),
+          strandContains("simultaneous"),
+        ],
+      };
+    case "GEOMETRY":
+      return {
+        OR: [
+          strandContains("geometry"),
+          strandContains("geometrical"),
+          strandContains("shape"),
+          strandContains("angle"),
+          strandContains("perimeter"),
+          strandContains("area"),
+          strandContains("volume"),
+          strandContains("construction"),
+          strandContains("trigonometry"),
+          strandContains("similarity"),
+          strandContains("Pythagoras"),
+          strandContains("bearing"),
+          strandContains("loci"),
+          strandContains("coordinate"),
+          strandContains("position"),
+          strandContains("direction"),
+          strandContains("symmetry"),
+          strandContains("transformation"),
+          strandContains("elevation"),
+          strandContains("polygon"),
+        ],
+      };
+    case "DATA":
+      return {
+        OR: [
+          strandContains("data"),
+          strandContains("statistic"),
+          strandContains("sampling"),
+          strandContains("summary"),
+          strandContains("table"),
+          strandContains("numerical summaries"),
+        ],
+      };
+    case "PROBABILITY":
+      return {
+        OR: [strandContains("probability"), strandContains("probabilities")],
+      };
+    case "RATIO":
+      return {
+        OR: [
+          strandContains("ratio"),
+          strandContains("proportion"),
+          strandContains("multiplicative relationship"),
+          strandContains("compound measure"),
+        ],
+      };
+    case "NUMBER":
+      return {
+        OR: [
+          strandContains("number"),
+          strandContains("place value"),
+          strandContains("fraction"),
+          strandContains("decimal"),
+          strandContains("integer"),
+          strandContains("arithmetic"),
+          strandContains("addition"),
+          strandContains("subtraction"),
+          strandContains("multiplication"),
+          strandContains("division"),
+          strandContains("calculating"),
+          strandContains("rounding"),
+          strandContains("standard form"),
+          strandContains("surds"),
+          strandContains("money"),
+          strandContains("measure"),
+          strandContains("time"),
+          strandContains("coin"),
+        ],
+      };
+    default:
+      return null;
+  }
 }
 
 async function resolveOrganisation(organisationSlug?: string) {
@@ -63,6 +177,21 @@ async function resolveOrganisation(organisationSlug?: string) {
 function buildObjectiveWhere(input: ObjectiveWhereInput) {
   const search = normalizeSearch(input.search);
   const strand = normalizeOptionalText(input.strand);
+  const domainClause = buildDomainClause(input.domain);
+  const searchClause = search
+    ? {
+        OR: [
+          { code: { contains: search, mode: "insensitive" as const } },
+          { title: { contains: search, mode: "insensitive" as const } },
+          { statement: { contains: search, mode: "insensitive" as const } },
+          { strand: { contains: search, mode: "insensitive" as const } },
+          { keywords: { hasSome: [search] } },
+        ],
+      }
+    : null;
+  const andClauses = [domainClause, searchClause].filter(
+    (clause): clause is NonNullable<typeof clause> => Boolean(clause)
+  );
 
   return {
     organisationId: input.organisationId,
@@ -100,17 +229,7 @@ function buildObjectiveWhere(input: ObjectiveWhereInput) {
           },
         }
       : {}),
-    ...(search
-      ? {
-          OR: [
-            { code: { contains: search, mode: "insensitive" as const } },
-            { title: { contains: search, mode: "insensitive" as const } },
-            { statement: { contains: search, mode: "insensitive" as const } },
-            { strand: { contains: search, mode: "insensitive" as const } },
-            { keywords: { hasSome: [search] } },
-          ],
-        }
-      : {}),
+    ...(andClauses.length ? { AND: andClauses } : {}),
   };
 }
 
@@ -122,6 +241,7 @@ export async function listOakCurriculumObjectives(input: ExplorerFilterInput) {
     subject: input.subject,
     keyStage: input.keyStage,
     yearGroup: input.yearGroup,
+    domain: input.domain,
     strand: input.strand,
     search: input.search,
     hasContent: input.hasContent,
@@ -193,6 +313,7 @@ export async function listOakCurriculumObjectives(input: ExplorerFilterInput) {
       subject: input.subject ?? null,
       keyStage: input.keyStage ?? null,
       yearGroup: input.yearGroup ?? null,
+      domain: input.domain ?? null,
       strand: normalizeOptionalText(input.strand) ?? null,
       search: normalizeSearch(input.search) ?? null,
       hasContent: input.hasContent ?? null,
@@ -228,6 +349,127 @@ export async function listOakCurriculumObjectives(input: ExplorerFilterInput) {
         answerText: question.answerText,
       })),
     })),
+  };
+}
+
+export async function searchOakCurriculumStrands(input: ExplorerFilterInput) {
+  const organisation = await resolveOrganisation(input.organisationSlug);
+  const limit = Math.min(Math.max(input.limit ?? 80, 1), 250);
+  const where = buildObjectiveWhere({
+    organisationId: organisation.id,
+    subject: input.subject,
+    keyStage: input.keyStage,
+    yearGroup: input.yearGroup,
+    domain: input.domain,
+    strand: input.strand,
+    search: input.search,
+    hasContent: input.hasContent,
+    hasCanonical: input.hasCanonical,
+  });
+
+  const objectives = await prisma.curriculumObjective.findMany({
+    where,
+    take: limit,
+    orderBy: [
+      { subject: "asc" },
+      { keyStage: "asc" },
+      { yearGroup: "asc" },
+      { strand: "asc" },
+      { title: "asc" },
+    ],
+    select: {
+      id: true,
+      code: true,
+      subject: true,
+      keyStage: true,
+      yearGroup: true,
+      strand: true,
+      title: true,
+      statement: true,
+      _count: {
+        select: {
+          chunks: true,
+          canonicalQuestions: true,
+        },
+      },
+    },
+  });
+
+  const grouped = new Map<
+    string,
+    {
+      subject: Subject;
+      keyStage: KeyStage;
+      yearGroup: number | null;
+      strand: string;
+      objectiveCount: number;
+      contentChunkCount: number;
+      canonicalQuestionCount: number;
+      objectives: Array<{
+        id: string;
+        code: string;
+        title: string;
+        statement: string;
+      }>;
+    }
+  >();
+
+  for (const objective of objectives) {
+    const key = [
+      objective.subject,
+      objective.keyStage,
+      objective.yearGroup ?? "na",
+      objective.strand,
+    ].join("|");
+    const existing =
+      grouped.get(key) ??
+      {
+        subject: objective.subject,
+        keyStage: objective.keyStage,
+        yearGroup: objective.yearGroup,
+        strand: objective.strand,
+        objectiveCount: 0,
+        contentChunkCount: 0,
+        canonicalQuestionCount: 0,
+        objectives: [],
+      };
+
+    existing.objectiveCount += 1;
+    existing.contentChunkCount += objective._count.chunks;
+    existing.canonicalQuestionCount += objective._count.canonicalQuestions;
+    if (existing.objectives.length < 4) {
+      existing.objectives.push({
+        id: objective.id,
+        code: objective.code,
+        title: objective.title,
+        statement: objective.statement,
+      });
+    }
+    grouped.set(key, existing);
+  }
+
+  const items = Array.from(grouped.values()).sort(
+    (a, b) =>
+      a.keyStage.localeCompare(b.keyStage) ||
+      (a.yearGroup ?? 999) - (b.yearGroup ?? 999) ||
+      a.strand.localeCompare(b.strand)
+  );
+
+  return {
+    organisation,
+    filters: {
+      subject: input.subject ?? null,
+      keyStage: input.keyStage ?? null,
+      yearGroup: input.yearGroup ?? null,
+      domain: input.domain ?? null,
+      strand: normalizeOptionalText(input.strand) ?? null,
+      search: normalizeSearch(input.search) ?? null,
+      hasContent: input.hasContent ?? null,
+      hasCanonical: input.hasCanonical ?? null,
+      limit,
+    },
+    count: items.length,
+    items,
   };
 }
 

@@ -9,6 +9,20 @@ type OakClientOptions = {
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const MAX_RETRIES = 3;
+
+function retryDelayMs(res: Response) {
+  const raw =
+    res.headers.get("retry-after") ??
+    res.headers.get("x-retry-after") ??
+    res.headers.get("x-ratelimit-reset");
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 3000;
+  if (parsed > 1_000_000_000_000) {
+    return Math.max(1000, parsed - Date.now());
+  }
+  return Math.max(1000, parsed * 1000);
+}
 
 function requiredEnv(name: string) {
   const v = process.env[name];
@@ -58,6 +72,14 @@ export async function oakGet<T = unknown>(
   path: string,
   init: OakFetchInit = {},
 ): Promise<T> {
+  return oakGetAttempt<T>(path, init, 0);
+}
+
+async function oakGetAttempt<T = unknown>(
+  path: string,
+  init: OakFetchInit = {},
+  attempt: number,
+): Promise<T> {
   if (!path.startsWith("/")) path = "/" + path;
 
   const url = new URL(opts.baseUrl.replace(/\/+$/, "") + path);
@@ -73,40 +95,56 @@ export async function oakGet<T = unknown>(
   await limiter.waitTurn();
 
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), opts.timeoutMs);
+  let timeout: NodeJS.Timeout | undefined;
 
   try {
-    const res = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${opts.apiKey}`,
-        Accept: "application/json",
-        ...(init.headers ?? {}),
-      },
-      signal: controller.signal,
+    const request = (async () => {
+      const res = await fetch(url.toString(), {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${opts.apiKey}`,
+          Accept: "application/json",
+          ...(init.headers ?? {}),
+        },
+        signal: controller.signal,
+      });
+
+      // Handle rate limiting politely
+      if (res.status === 429) {
+        await sleep(retryDelayMs(res));
+        return oakGetAttempt<T>(path, init, attempt + 1);
+      }
+
+      if (!res.ok) {
+        const body = await safeReadText(res);
+        throw new Error(
+          `Oak API error ${res.status} ${res.statusText} on ${path}: ${body}`,
+        );
+      }
+
+      const contentType = res.headers.get("content-type") ?? "";
+      if (init.forceText || !contentType.includes("application/json")) {
+        return (await res.text()) as unknown as T;
+      }
+      return (await res.json()) as T;
+    })();
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`Oak API timeout after ${opts.timeoutMs}ms on ${path}`));
+      }, opts.timeoutMs);
     });
 
-    // Handle rate limiting politely
-    if (res.status === 429) {
-      const retryAfter = Number(res.headers.get("retry-after") ?? "3");
-      await sleep(Math.max(1000, retryAfter * 1000));
-      return oakGet<T>(path, init);
+    return await Promise.race([request, timeoutPromise]);
+  } catch (error) {
+    if (attempt < MAX_RETRIES) {
+      await sleep(1000 * (attempt + 1));
+      return oakGetAttempt<T>(path, init, attempt + 1);
     }
-
-    if (!res.ok) {
-      const body = await safeReadText(res);
-      throw new Error(
-        `Oak API error ${res.status} ${res.statusText} on ${path}: ${body}`,
-      );
-    }
-
-    const contentType = res.headers.get("content-type") ?? "";
-    if (init.forceText || !contentType.includes("application/json")) {
-      return (await res.text()) as unknown as T;
-    }
-    return (await res.json()) as T;
+    throw error;
   } finally {
-    clearTimeout(t);
+    if (timeout) clearTimeout(timeout);
   }
 }
 

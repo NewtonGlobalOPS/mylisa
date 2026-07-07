@@ -307,18 +307,13 @@ export const ks1Year1MathsProfiles: ObjectiveProfileDefinition<CanonicalProfile>
    */
   directProfile(
     "oak:maths:ks1:unitising-and-coin-recognition-solving-problems-involving-money:490635989035e0cfa0e901929677334ce9c62e73",
-    "count_in_10s_money_strand",
-    "count_in_10s"
+    "coin_value_money_strand",
+    "coin_value"
   ),
   directProfile(
     "oak:maths:ks1:unitising-and-coin-recognition-solving-problems-involving-money:e3927710bc68fcfb0358fafe58b407710e8510c0",
     "half_of_quantity_money_strand",
     "half_of_quantity"
-  ),
-  directProfile(
-    "oak:maths:ks1:unitising-and-coin-recognition-solving-problems-involving-money:42142d29a383d33a0d896b08e122a9291d5d6819",
-    "count_in_2s_money_intro",
-    "count_in_2s"
   ),
   poolProfile(
     "oak:maths:ks1:unitising-and-coin-recognition-solving-problems-involving-money:08d510b4b0de32c3875d54f34b9c96485ced41fe",
@@ -367,8 +362,8 @@ export const ks1Year1MathsProfiles: ObjectiveProfileDefinition<CanonicalProfile>
   ),
   directProfile(
     "oak:maths:ks1:unitising-and-coin-recognitions-counting-in-2s-5s-and-10s:42142d29a383d33a0d896b08e122a9291d5d6819",
-    "count_in_2s_coin_counting",
-    "count_in_2s"
+    "coin_value_counting_strand",
+    "coin_value"
   ),
 
   /**
@@ -381,7 +376,7 @@ export const ks1Year1MathsProfiles: ObjectiveProfileDefinition<CanonicalProfile>
   ),
   directProfile(
     "oak:maths:ks1:unitising-and-coin-recognition-value-of-a-set-of-coins:42142d29a383d33a0d896b08e122a9291d5d6819",
-    "count_in_2s_coin_value_strand",
-    "count_in_2s"
+    "coin_value_set_problem_strand",
+    "coin_value"
   ),
 ];

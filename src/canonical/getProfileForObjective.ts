@@ -16,6 +16,17 @@ function hasAny(text: string, terms: string[]): boolean {
   return terms.some((term) => text.includes(term));
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasWholeWord(text: string, terms: string[]): boolean {
+  return terms.some((term) => {
+    const pattern = new RegExp(`\\b${escapeRegExp(term)}\\b`);
+    return pattern.test(text);
+  });
+}
+
 function normalise(value: string | null | undefined): string {
   return (value ?? "").trim();
 }
@@ -50,7 +61,6 @@ function buildDirectProfile(
 
 function classifyYear3MathsDirectGenerator(objective: ObjectiveLike): string | null {
   if (objective.subject !== "MATHS") return null;
-  if (objective.keyStage !== "KS2") return null;
   if (objective.yearGroup !== 3) return null;
 
   const text = normaliseObjectiveText(objective);
@@ -272,7 +282,6 @@ function classifyYear3MathsDirectGenerator(objective: ObjectiveLike): string | n
 
 function classifyYear4MathsDirectGenerator(objective: ObjectiveLike): string | null {
   if (objective.subject !== "MATHS") return null;
-  if (objective.keyStage !== "KS2") return null;
   if (objective.yearGroup !== 4) return null;
 
   const text = normaliseObjectiveText(objective);
@@ -459,9 +468,102 @@ function classifySecondaryMathsDirectGenerator(
   objective: ObjectiveLike
 ): string | null {
   if (objective.subject !== "MATHS") return null;
-  if (![7, 8, 9, 10].includes(objective.yearGroup ?? -1)) return null;
+  if (![7, 8, 9, 10, 11].includes(objective.yearGroup ?? -1)) return null;
 
   const text = normaliseObjectiveText(objective);
+  const code = normalise(objective.code).toLowerCase();
+
+  if (
+    code ===
+    "oak:maths:ks3:geometrical-properties-polygons:e23f6b0249fd85bb211822d53c026091fc03e24d"
+  ) {
+    return "SCALE_DRAWINGS_FOUNDATION";
+  }
+
+  if (
+    code ===
+    "oak:maths:ks4:algebraic-manipulation:f52e1bc374ca91c238cf07b7bd1121a36f283409"
+  ) {
+    return "SOLVE_QUADRATIC_FOUNDATION";
+  }
+
+  if (
+    code ===
+    "oak:maths:ks4:inequalities:a1c65100282e20b6f2b2c313fdec8fdf73b99703"
+  ) {
+    return "SOLVE_INEQUALITY_FOUNDATION";
+  }
+
+  if (
+    code ===
+      "oak:maths:ks3:sequences:032d60bb5f2e31b63e5745f31838a9fb526e7106" ||
+    code ===
+      "oak:maths:ks3:expressions-and-equations:10564bd0f94bb64de5f9f59be425433a47cea65e"
+  ) {
+    return null;
+  }
+
+  if (objective.yearGroup === 11) {
+    if (code.includes("conditional-probability")) {
+      return "PROBABILITY_FOUNDATION";
+    }
+    if (code.includes("direct-and-inverse-proportion")) {
+      return "RATIO_SCALE";
+    }
+    if (code.includes("further-sequences:84cac314bad82f488f964e17519933affd724bc2")) {
+      return "PERCENTAGE_CHANGE_FOUNDATION";
+    }
+    if (
+      code.includes("further-sequences:bd81efb41ec6ec7cc0a17b65237079e31ba039fe") ||
+      code.includes("further-sequences:c3b68f71202c970152cf16f50e8e1aa3b5a7cb96")
+    ) {
+      return "LINEAR_SEQUENCE_TERM";
+    }
+    if (code.includes("graphical-representations-of-data-cumulative-frequency-and-histograms")) {
+      return "MEAN_MEDIAN_MODE_RANGE";
+    }
+    if (code.includes("2d-and-3d-shape-surface-area-and-volume-pyramids-spheres-and-cones")) {
+      return "AREA_PERIMETER_FOUNDATION";
+    }
+    if (code.includes("algebraic-fractions:449df9fa17a06d0c79c57def5d69558387c4f942")) {
+      return "FRACTION_OPERATIONS_FOUNDATION";
+    }
+    if (code.includes("iteration:f7f3ef5f0ee48c4517bab52d931b51fa5baff0b0")) {
+      return null;
+    }
+    if (code.includes("non-right-angled-trigonometry:49811d1ee45816f5b54a97f73ddf05976144e494")) {
+      return null;
+    }
+  }
+
+  if (
+    hasAny(text, [
+      "numerical summaries of data",
+      "observed distributions of a single variable",
+      "measures of central tendency",
+      "mean, mode, median",
+      "spread (range",
+      "outliers",
+    ])
+    || hasWholeWord(text, ["mean", "median", "mode", "range", "average", "outliers"])
+  ) {
+    return "MEAN_MEDIAN_MODE_RANGE";
+  }
+
+  if (
+    hasAny(text, [
+      "graphical representations of data",
+      "frequency tables",
+      "bar charts",
+      "pie charts",
+      "pictograms",
+      "charts, and diagrams",
+      "grouped numerical data",
+      "construct and interpret appropriate tables",
+    ])
+  ) {
+    return null;
+  }
 
   if (hasAny(text, ["substitute", "substitution"])) {
     return "SUBSTITUTE_INTO_EXPRESSION";
@@ -482,11 +584,20 @@ function classifySecondaryMathsDirectGenerator(
     return "SIMPLIFY_EXPRESSION";
   }
 
-  if (hasAny(text, ["solve two-step", "solve equations with two", "2-step"])) {
+  if (hasAny(text, ["solve two-step", "solve equations with two", "2-step", "two-step equations"])) {
     return "SOLVE_LINEAR_TWO_STEP";
   }
 
-  if (hasAny(text, ["solve", "equation", "unknown"])) {
+  if (
+    hasAny(text, [
+      "one-step equations",
+      "solve one-step",
+      "find the unknown",
+      "find the value of the unknown",
+    ]) ||
+    (hasWholeWord(text, ["equation", "equations", "unknown"]) &&
+      hasWholeWord(text, ["solve", "solving"]))
+  ) {
     return "SOLVE_LINEAR_ONE_STEP";
   }
 
@@ -566,19 +677,15 @@ function classifySecondaryMathsDirectGenerator(
     return "ANGLE_FACTS_FOUNDATION";
   }
 
-  if (hasAny(text, ["probability", "chance"])) {
+  if (hasWholeWord(text, ["probability", "chance"])) {
     return "PROBABILITY_FOUNDATION";
-  }
-
-  if (hasAny(text, ["mean", "median", "mode", "range", "average"])) {
-    return "MEAN_MEDIAN_MODE_RANGE";
   }
 
   if (hasAny(text, ["number", "negative", "integer", "decimal", "place value"])) {
     return "DECIMAL_OPERATIONS_FOUNDATION";
   }
 
-  return "SOLVE_LINEAR_ONE_STEP";
+  return null;
 }
 
 export function getProfileForObjective(

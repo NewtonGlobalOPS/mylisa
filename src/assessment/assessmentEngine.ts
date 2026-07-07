@@ -1,25 +1,34 @@
-import { DifficultyBand } from "@prisma/client";
+import { DifficultyBand, Subject } from "@prisma/client";
+import { answerMaskMatches } from "../lib/answerMask.js";
 
-export type AssessmentStrand =
-  | "NUMBER"
-  | "ALGEBRA"
-  | "RATIO"
-  | "GEOMETRY"
-  | "DATA";
+export type AssessmentStrand = string;
 
 export type AnswerMode = "numeric" | "fraction" | "algebra" | "text" | "multi_part";
 
-export type AssessmentChoiceKey = "A" | "B" | "C" | "D";
+export type AssessmentChoiceKey = string;
 
 export type AssessmentChoice = {
   key: AssessmentChoiceKey;
   label: string;
 };
 
+export type AssessmentResponseKind =
+  | "single_choice"
+  | "multi_select"
+  | "short_answer"
+  | "match"
+  | "order";
+
+export type AssessmentMatchPair = {
+  left: string;
+  right: string;
+};
+
 export type AssessmentPoolRow = {
   id: string;
   objectiveId: string;
   itemType?: string | null;
+  subject?: Subject | string | null;
   code: string;
   title: string;
   statement?: string | null;
@@ -46,10 +55,15 @@ export type RuntimeQuestion = {
   difficulty: DifficultyBand;
 
   answerMode: AnswerMode;
+  answerContract?: string;
+  responseKind: AssessmentResponseKind;
   calculatorAllowed: boolean;
   inputHelp?: string;
   choices: AssessmentChoice[];
   correctChoiceKey: AssessmentChoiceKey;
+  correctChoiceKeys?: AssessmentChoiceKey[];
+  matchPairs?: AssessmentMatchPair[];
+  orderedAnswers?: string[];
 
   contentJson?: Record<string, unknown> | null;
 };
@@ -67,6 +81,9 @@ export type AssessmentResponse = {
   isCorrect: boolean;
   submittedAt: string;
   selectedChoiceKey?: AssessmentChoiceKey;
+  selectedChoiceKeys?: AssessmentChoiceKey[];
+  matchPairs?: AssessmentMatchPair[];
+  orderedAnswers?: string[];
 
   yearGroup: number;
   strand: AssessmentStrand;
@@ -91,7 +108,7 @@ export type StrandStats = {
 export type AssessmentSession = {
   sessionId: string;
 
-  subject: "MATHS";
+  subject: Subject;
   childCurrentYear: number;
   entryYear: number;
   minimumYear: number;
@@ -110,6 +127,7 @@ export type AssessmentSession = {
   skippedQuestions: SkippedAssessmentQuestion[];
   currentBandYear: number;
   minimumBandYear: number;
+  maximumBandYear: number;
   bandStartedAtResponseCount: number;
 
   strands: Record<AssessmentStrand, StrandStats>;
@@ -150,9 +168,23 @@ export type AssessmentResult = {
   }>;
 
   summary: string;
+  report?: AssessmentNarrativeReport;
 };
 
-const CORE_STRANDS: AssessmentStrand[] = [
+export type AssessmentNarrativeReport = {
+  displayBandLabel: string;
+  displayBandSummary: string;
+  parentNarrative: string;
+  tutorNarrative: string;
+  whatThisMeans: string;
+  strengths: string[];
+  focusAreas: string[];
+  nextSteps: string[];
+  tutorActions: string[];
+  confidenceNote: string;
+};
+
+const MATHS_CORE_STRANDS: AssessmentStrand[] = [
   "NUMBER",
   "ALGEBRA",
   "RATIO",
@@ -191,8 +223,15 @@ function shuffle<T>(items: T[]): T[] {
   return out;
 }
 
-function safeYear(yearGroup: number | null | undefined, fallback = 4): number {
-  if (typeof yearGroup !== "number" || Number.isNaN(yearGroup)) return fallback;
+function safeYear(yearGroup: number | null | undefined): number {
+  if (
+    typeof yearGroup !== "number" ||
+    Number.isNaN(yearGroup) ||
+    !Number.isInteger(yearGroup) ||
+    yearGroup < 1
+  ) {
+    throw new Error("Canonical assessment question is missing a valid year group.");
+  }
   return yearGroup;
 }
 
@@ -202,16 +241,23 @@ function getActiveStrandsFromQuestions(
   const seen = new Set<AssessmentStrand>();
 
   for (const question of questions) {
-    if (CORE_STRANDS.includes(question.strand)) {
-      seen.add(question.strand);
-    }
+    seen.add(question.strand);
   }
 
-  return seen.size > 0 ? Array.from(seen) : ["NUMBER"];
+  return seen.size > 0 ? Array.from(seen) : ["GENERAL"];
 }
 
 function getEffectiveStrands(session: AssessmentSession): AssessmentStrand[] {
-  return session.activeStrands.length > 0 ? session.activeStrands : ["NUMBER"];
+  return session.activeStrands.length > 0 ? session.activeStrands : ["GENERAL"];
+}
+
+function getReportableStrands(session: AssessmentSession): AssessmentStrand[] {
+  const effectiveStrands = getEffectiveStrands(session);
+  const answeredStrands = effectiveStrands.filter(
+    (strand) => (session.strands[strand]?.asked ?? 0) > 0
+  );
+
+  return answeredStrands.length > 0 ? answeredStrands : effectiveStrands;
 }
 
 function getYearBounds(questions: RuntimeQuestion[], entryYear: number): {
@@ -233,31 +279,23 @@ function determineEntryYear(
   questions: RuntimeQuestion[],
   childCurrentYear: number
 ): number {
-  const availableYears = [...new Set(questions.map((q) => q.yearGroup))]
-    .filter((year) => Number.isFinite(year))
-    .sort((a, b) => a - b);
-
   const desiredEntryYear = Math.max(1, childCurrentYear - 1);
-
-  if (availableYears.length === 0) {
-    return desiredEntryYear;
-  }
-
-  const floorYears = availableYears.filter((year) => year <= desiredEntryYear);
-  if (floorYears.length > 0) {
-    return floorYears[floorYears.length - 1];
-  }
-
-  return availableYears[0];
+  return desiredEntryYear;
 }
 
 function inferStrand(params: {
+  subject?: Subject | string | null;
   title: string;
   code: string;
   statement?: string | null;
   strand?: string | null;
   contentJson?: Record<string, unknown> | null;
 }): AssessmentStrand {
+  const subject = String(params.subject ?? "").toUpperCase();
+  if (subject === Subject.SCIENCE || params.code.toLowerCase().includes(":science:")) {
+    return normaliseAssessmentStrand(params.strand ?? params.title ?? "GENERAL_SCIENCE");
+  }
+
   const contentDomain =
     typeof params.contentJson?.domain === "string"
       ? params.contentJson.domain.toLowerCase()
@@ -394,6 +432,24 @@ function inferStrand(params: {
   return "NUMBER";
 }
 
+function normaliseAssessmentStrand(value: string): AssessmentStrand {
+  const cleaned = value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) return "GENERAL";
+
+  const upper = cleaned.toUpperCase();
+  if (MATHS_CORE_STRANDS.includes(upper)) return upper;
+
+  return cleaned;
+}
+
+function cleanAssessmentStrand(value: string | null | undefined): string {
+  return (value ?? "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function inferAnswerMode(
   promptText: string,
   answerText: string,
@@ -402,16 +458,34 @@ function inferAnswerMode(
   const prompt = promptText.toLowerCase();
   const answer = answerText.trim().toLowerCase();
   const normalizedItemType = String(itemType ?? "").toUpperCase();
+  const answerLooksNumeric = /^£?\d+(?:\.\d+)?(?:\s?[a-z°²]+)?$/i.test(answer);
+  const isYesNoPrompt = prompt.includes("yes or no");
 
   if (answer.includes(" and ") || answer.includes(",")) return "multi_part";
   if (answer.includes("/")) return "fraction";
+  if (
+    ["<", ">", "=", "!=", "≤", "≥"].includes(answer) ||
+    prompt.includes("put <") ||
+    prompt.includes("put >") ||
+    prompt.includes("put =") ||
+    (prompt.includes("between") &&
+      (prompt.includes("<") || prompt.includes(">") || prompt.includes("=")))
+  ) {
+    return "text";
+  }
 
   if (
-    normalizedItemType === "SHAPE_NAME" ||
-    normalizedItemType === "TURN_DIRECTION" ||
-    prompt.includes("yes or no") ||
+    isYesNoPrompt ||
     prompt.includes("called what")
   ) {
+    return "text";
+  }
+
+  if (normalizedItemType === "TURN_DIRECTION" && !answerLooksNumeric) {
+    return "text";
+  }
+
+  if (normalizedItemType === "SHAPE_NAME" && !answerLooksNumeric) {
     return "text";
   }
 
@@ -424,6 +498,121 @@ function inferAnswerMode(
   }
 
   return "numeric";
+}
+
+function getCanonicalTruth(contentJson?: Record<string, unknown> | null): Record<string, unknown> | null {
+  const truth = contentJson?.canonicalTruth;
+  return truth && typeof truth === "object" ? (truth as Record<string, unknown>) : null;
+}
+
+function getAnswerContract(contentJson?: Record<string, unknown> | null): string | null {
+  if (typeof contentJson?.answerContract === "string") return contentJson.answerContract;
+  const truth = getCanonicalTruth(contentJson);
+  return typeof truth?.answerContract === "string" ? String(truth.answerContract) : null;
+}
+
+function getImmutableAnswers(contentJson?: Record<string, unknown> | null): string[] {
+  const answers = getCanonicalTruth(contentJson)?.immutableAnswers;
+  if (!Array.isArray(answers)) return [];
+
+  return answers
+    .map((answer) => String(answer ?? "").trim())
+    .filter((answer) => answer.length > 0);
+}
+
+function getPrimaryImmutableAnswer(contentJson?: Record<string, unknown> | null): string | null {
+  return getImmutableAnswers(contentJson)[0] ?? null;
+}
+
+function getAssessmentAnswerText(
+  answerText: string,
+  contentJson?: Record<string, unknown> | null
+): string {
+  const contract = getAnswerContract(contentJson);
+
+  if (contract === "short_answer_alias") {
+    return getPrimaryImmutableAnswer(contentJson) ?? answerText.split(" / ")[0]?.trim() ?? answerText;
+  }
+
+  return answerText;
+}
+
+function getResponseKind(params: {
+  itemType?: string | null;
+  contentJson?: Record<string, unknown> | null;
+}): AssessmentResponseKind {
+  const itemType = String(params.itemType ?? "").toUpperCase();
+  const contract = getAnswerContract(params.contentJson);
+
+  if (itemType === "OAK_MATCH" || contract === "match") return "match";
+  if (itemType === "OAK_ORDER" || contract === "order") return "order";
+  if (itemType === "OAK_MULTI_BLANK_CHOICE" || contract === "multi_blank_choice") {
+    return "multi_select";
+  }
+  if (contract === "single_choice") return "single_choice";
+  if (contract === "short_answer_alias") return "short_answer";
+
+  return "single_choice";
+}
+
+function choiceKey(index: number): AssessmentChoiceKey {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  return alphabet[index] ?? String(index + 1);
+}
+
+function choicesFromLabels(labels: string[]): AssessmentChoice[] {
+  return labels.map((label, index) => ({ key: choiceKey(index), label }));
+}
+
+function getOptionBank(contentJson?: Record<string, unknown> | null): string[] {
+  const optionBank = getCanonicalTruth(contentJson)?.optionBank;
+  if (!Array.isArray(optionBank)) return [];
+
+  return dedupe(
+    optionBank
+      .map((option) => String(option ?? "").trim())
+      .filter((option) => option.length > 0)
+  );
+}
+
+function getCorrectChoiceKeys(
+  choices: AssessmentChoice[],
+  correctAnswers: string[]
+): AssessmentChoiceKey[] {
+  const correct = new Set(correctAnswers.map(normalizeText));
+  return choices
+    .filter((choice) => correct.has(normalizeText(choice.label)))
+    .map((choice) => choice.key);
+}
+
+function getMatchPairs(contentJson?: Record<string, unknown> | null): AssessmentMatchPair[] {
+  const pairs = getCanonicalTruth(contentJson)?.matchPairs;
+  if (!Array.isArray(pairs)) return [];
+
+  return pairs
+    .map((pair) => {
+      if (!pair || typeof pair !== "object") return null;
+      const left = String((pair as { left?: unknown }).left ?? "").trim();
+      const right = String((pair as { right?: unknown }).right ?? "").trim();
+      return left && right ? { left, right } : null;
+    })
+    .filter((pair): pair is AssessmentMatchPair => pair !== null);
+}
+
+function getOrderedAnswers(contentJson?: Record<string, unknown> | null): string[] {
+  const answers = getCanonicalTruth(contentJson)?.orderedAnswers;
+  if (!Array.isArray(answers)) return [];
+
+  return answers
+    .map((answer) => String(answer ?? "").trim())
+    .filter((answer) => answer.length > 0);
+}
+
+function normalizePromptForAssessment(promptText: string): string {
+  return promptText
+    .replace(/\{\{\s*\}\}/g, "____")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function inferCalculatorAllowed(question: {
@@ -530,6 +719,93 @@ function formatTimeAnswer(hour: number, minute: number): string {
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
+function parseClockTextAnswer(answerText: string): {
+  hour: number;
+  minute: number;
+  suffix: "am" | "pm" | "o'clock" | "";
+} | null {
+  const normalized = answerText.trim().toLowerCase();
+  const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm|o'clock)?$/);
+  if (!match) return null;
+
+  const hour = Number(match[1]);
+  const minute = match[2] != null ? Number(match[2]) : 0;
+  const suffix = (match[3] as "am" | "pm" | "o'clock" | undefined) ?? "";
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  if (hour < 0 || hour > 12 || minute < 0 || minute > 59) return null;
+
+  return { hour, minute, suffix };
+}
+
+function formatClockTextAnswer(input: {
+  hour: number;
+  minute: number;
+  suffix: "am" | "pm" | "o'clock" | "";
+}): string {
+  if (input.suffix === "o'clock") {
+    return `${input.hour} o'clock`;
+  }
+
+  if (input.suffix === "am" || input.suffix === "pm") {
+    return `${input.hour}:${String(input.minute).padStart(2, "0")} ${input.suffix}`;
+  }
+
+  return `${input.hour}:${String(input.minute).padStart(2, "0")}`;
+}
+
+function wrapClockHour(hour: number): number {
+  const normalized = ((hour - 1 + 12) % 12) + 1;
+  return normalized === 0 ? 12 : normalized;
+}
+
+function buildClockTextDistractors(answerText: string): string[] {
+  const parsed = parseClockTextAnswer(answerText);
+  if (!parsed) return [];
+
+  const candidates = [
+    formatClockTextAnswer({
+      hour: parsed.hour,
+      minute: (parsed.minute + 30) % 60,
+      suffix: parsed.suffix,
+    }),
+    formatClockTextAnswer({
+      hour: wrapClockHour(parsed.minute + 30 >= 60 ? parsed.hour + 1 : parsed.hour),
+      minute: (parsed.minute + 30) % 60,
+      suffix: parsed.suffix,
+    }),
+    formatClockTextAnswer({
+      hour: wrapClockHour(parsed.hour + 1),
+      minute: parsed.minute,
+      suffix: parsed.suffix,
+    }),
+    formatClockTextAnswer({
+      hour: wrapClockHour(parsed.hour - 1),
+      minute: parsed.minute,
+      suffix: parsed.suffix,
+    }),
+    formatClockTextAnswer({
+      hour: parsed.hour,
+      minute: (parsed.minute + 10) % 60,
+      suffix: parsed.suffix,
+    }),
+    formatClockTextAnswer({
+      hour: parsed.hour,
+      minute: Math.max(0, parsed.minute - 10),
+      suffix: parsed.suffix,
+    }),
+    parsed.suffix === "am"
+      ? formatClockTextAnswer({ hour: parsed.hour, minute: parsed.minute, suffix: "pm" })
+      : parsed.suffix === "pm"
+      ? formatClockTextAnswer({ hour: parsed.hour, minute: parsed.minute, suffix: "am" })
+      : "",
+  ];
+
+  return dedupe(
+    candidates.filter((candidate) => candidate && candidate.toLowerCase() !== answerText.trim().toLowerCase())
+  ).slice(0, 3);
+}
+
 function buildTimeDistractors(answerText: string): string[] {
   const parsed = parseTimeAnswer(answerText);
   if (!parsed) return [];
@@ -602,18 +878,113 @@ function buildYesNoDistractors(answerText: string): string[] {
   return normalized === "yes" ? ["no", "both", "neither"] : ["yes", "both", "neither"];
 }
 
+function buildSymbolDistractors(question: {
+  promptText: string;
+  answerText: string;
+  itemType?: string | null;
+}): string[] {
+  const prompt = question.promptText.toLowerCase();
+  const answer = question.answerText.trim();
+  const itemType = String(question.itemType ?? "").toUpperCase();
+
+  const comparisonPool = ["<", ">", "=", "!="];
+  if (
+    itemType === "COMPARISON" ||
+    comparisonPool.includes(answer) ||
+    prompt.includes("put <") ||
+    prompt.includes("put >") ||
+    prompt.includes("put =") ||
+    prompt.includes("between") && (prompt.includes("<") || prompt.includes(">") || prompt.includes("=")) ||
+    prompt.includes("less than") ||
+    prompt.includes("greater than")
+  ) {
+    return comparisonPool.filter((item) => item !== answer).slice(0, 3);
+  }
+
+  const operatorPool = ["+", "-", "x", "÷"];
+  if (
+    itemType === "EQUATION" ||
+    operatorPool.includes(answer) ||
+    prompt.includes("which operation") ||
+    prompt.includes("what operation") ||
+    prompt.includes("which symbol")
+  ) {
+    return operatorPool.filter((item) => item !== answer).slice(0, 3);
+  }
+
+  return [];
+}
+
 function buildTextDistractors(question: {
   promptText: string;
   answerText: string;
+  itemType?: string | null;
+  contentJson?: Record<string, unknown> | null;
 }): string[] {
   const prompt = question.promptText.toLowerCase();
   const answer = question.answerText.trim();
   const answerLower = answer.toLowerCase();
+  const itemType = String(question.itemType ?? "").toUpperCase();
+  const contentDomain =
+    typeof question.contentJson?.domain === "string"
+      ? question.contentJson.domain.toLowerCase()
+      : "";
 
   const yesNo = buildYesNoDistractors(answer);
   if (yesNo.length > 0) return yesNo;
 
-  if (prompt.includes("shape") || prompt.includes("sides") || prompt.includes("symmetry")) {
+  const symbolDistractors = buildSymbolDistractors(question);
+  if (symbolDistractors.length > 0) return symbolDistractors;
+
+  if (
+    itemType === "TURN_DIRECTION" ||
+    prompt.includes("turn") ||
+    answerLower.includes("clockwise") ||
+    answerLower.includes("anticlockwise") ||
+    answerLower === "left" ||
+    answerLower === "right" ||
+    answerLower.includes("full turn") ||
+    answerLower.includes("half turn") ||
+    answerLower.includes("quarter turn") ||
+    answerLower.includes("three-quarter turn")
+  ) {
+    const pool = [
+      "left",
+      "right",
+      "clockwise",
+      "anticlockwise",
+      "half turn",
+      "quarter turn",
+      "three-quarter turn",
+      "full turn",
+    ];
+    return pool.filter((item) => item !== answerLower).slice(0, 3);
+  }
+
+  if (
+    prompt.includes("line") ||
+    answerLower === "parallel" ||
+    answerLower === "perpendicular" ||
+    answerLower === "horizontal" ||
+    answerLower === "vertical"
+  ) {
+    const pool = [
+      "parallel",
+      "perpendicular",
+      "horizontal",
+      "vertical",
+      "diagonal",
+    ];
+    return pool.filter((item) => item !== answerLower).slice(0, 3);
+  }
+
+  if (
+    itemType === "SHAPE_NAME" ||
+    prompt.includes("shape") ||
+    prompt.includes("sides") ||
+    prompt.includes("symmetry") ||
+    contentDomain.includes("shape")
+  ) {
     const pool = [
       "triangle",
       "square",
@@ -621,31 +992,92 @@ function buildTextDistractors(question: {
       "circle",
       "pentagon",
       "hexagon",
+      "octagon",
       "cube",
       "cone",
-      "parallel",
-      "perpendicular",
     ];
     return pool.filter((item) => item !== answerLower).slice(0, 3);
   }
 
-  if (prompt.includes("clock") || prompt.includes("in words") || answerLower.includes("past")) {
-    const pool = [
-      "quarter past 3",
-      "half past 6",
-      "quarter to 9",
-      "12:00 am",
-      "2:00 pm",
-    ];
+  if (
+    itemType === "TIME_MATCH" ||
+    prompt.includes("clock") ||
+    prompt.includes("in words") ||
+    answerLower.includes("past") ||
+    contentDomain.includes("time")
+  ) {
+    const exactClockDistractors = buildClockTextDistractors(question.answerText);
+    if (exactClockDistractors.length > 0) {
+      return exactClockDistractors;
+    }
+
+    const pool = answerLower.includes("o'clock")
+      ? [
+          "1 o'clock",
+          "2 o'clock",
+          "3 o'clock",
+          "4 o'clock",
+          "5 o'clock",
+          "6 o'clock",
+          "7 o'clock",
+          "8 o'clock",
+          "9 o'clock",
+          "10 o'clock",
+          "11 o'clock",
+          "12 o'clock",
+        ]
+      : [
+          "quarter past 3",
+          "half past 6",
+          "quarter to 9",
+          "12:00",
+          "2:00",
+        ];
     return pool.filter((item) => item.toLowerCase() !== answerLower).slice(0, 3);
   }
 
-  if (prompt.includes("called") || prompt.includes("what do we call")) {
-    const pool = ["parallel", "perpendicular", "triangle", "rectangle"];
+  if (
+    prompt.includes("called") ||
+    prompt.includes("what do we call") ||
+    prompt.includes("what is this called")
+  ) {
+    const pool = ["parallel", "perpendicular", "horizontal", "vertical"];
     return pool.filter((item) => item !== answerLower).slice(0, 3);
   }
 
-  return ["not sure", "none", "other"].filter((item) => item !== answerLower).slice(0, 3);
+  if (
+    prompt.includes("day") ||
+    prompt.includes("month") ||
+    prompt.includes("yesterday") ||
+    prompt.includes("tomorrow")
+  ) {
+    const pool = [
+      "monday",
+      "tuesday",
+      "wednesday",
+      "thursday",
+      "friday",
+      "saturday",
+      "sunday",
+      "january",
+      "february",
+      "march",
+      "april",
+    ];
+    return pool.filter((item) => item !== answerLower).slice(0, 3);
+  }
+
+  const genericMathPool = [
+    "triangle",
+    "square",
+    "rectangle",
+    "circle",
+    "parallel",
+    "perpendicular",
+    "left",
+    "right",
+  ];
+  return genericMathPool.filter((item) => item !== answerLower).slice(0, 3);
 }
 
 function buildAlgebraDistractors(answerText: string): string[] {
@@ -689,6 +1121,8 @@ function supplementDistractors(
     promptText: string;
     answerText: string;
     answerMode: AnswerMode;
+    itemType?: string | null;
+    contentJson?: Record<string, unknown> | null;
   },
   distractors: string[]
 ): string[] {
@@ -708,10 +1142,6 @@ function supplementDistractors(
     }
   };
 
-  if (supplemented.length < 3) {
-    addCandidates(buildPromptNumberDistractors(question));
-  }
-
   if (supplemented.length < 3 && parsedAnswer.value != null) {
     addCandidates([
       formatNumericChoice(parsedAnswer.value + 3, parsedAnswer.suffix),
@@ -721,12 +1151,23 @@ function supplementDistractors(
     ]);
   }
 
+  if (supplemented.length < 3 && question.answerMode !== "text") {
+    addCandidates(buildPromptNumberDistractors(question));
+  }
+
   if (supplemented.length < 3 && question.answerMode === "algebra") {
     addCandidates(["0", "1", "2", "x", "x + 1", "2x"]);
   }
 
   if (supplemented.length < 3 && question.answerMode === "text") {
-    addCandidates(["yes", "no", "triangle", "square", "parallel", "perpendicular"]);
+    addCandidates(
+      buildTextDistractors({
+        promptText: question.promptText,
+        answerText: question.answerText,
+        itemType: question.itemType,
+        contentJson: question.contentJson,
+      })
+    );
   }
 
   return supplemented.slice(0, 3);
@@ -736,7 +1177,12 @@ function buildMultipleChoiceChoices(question: {
   promptText: string;
   answerText: string;
   answerMode: AnswerMode;
+  itemType?: string | null;
+  contentJson?: Record<string, unknown> | null;
 }): { choices: AssessmentChoice[]; correctChoiceKey: AssessmentChoiceKey } {
+  const authoredChoices = getAuthoredMultipleChoiceChoices(question);
+  if (authoredChoices) return authoredChoices;
+
   let distractors: string[] = [];
 
   switch (question.answerMode) {
@@ -769,20 +1215,81 @@ function buildMultipleChoiceChoices(question: {
     return allOptions[sourceIndex] ?? question.answerText;
   });
 
-  const keys: AssessmentChoiceKey[] = ["A", "B", "C", "D"];
   return {
     choices: ordered.map((label, index) => ({
-      key: keys[index]!,
+      key: choiceKey(index),
       label,
     })),
-    correctChoiceKey: keys[correctIndex]!,
+    correctChoiceKey: choiceKey(correctIndex),
   };
+}
+
+function getAuthoredMultipleChoiceChoices(question: {
+  promptText: string;
+  answerText: string;
+  contentJson?: Record<string, unknown> | null;
+}): { choices: AssessmentChoice[]; correctChoiceKey: AssessmentChoiceKey } | null {
+  const oak = question.contentJson?.oak;
+  if (!oak || typeof oak !== "object") return null;
+
+  const choicesRaw = (oak as { choices?: unknown }).choices;
+  if (!Array.isArray(choicesRaw)) return null;
+
+  const choices = choicesRaw
+    .map((choice) => {
+      if (!choice || typeof choice !== "object") return null;
+      const label = String((choice as { label?: unknown }).label ?? "").trim();
+      const isCorrect = (choice as { isCorrect?: unknown }).isCorrect === true;
+      return label ? { label, isCorrect } : null;
+    })
+    .filter((choice): choice is { label: string; isCorrect: boolean } => choice !== null);
+
+  const correct = choices.filter((choice) => choice.isCorrect);
+  if (choices.length < 2 || correct.length !== 1) return null;
+
+  const uniqueChoices = dedupe(choices.map((choice) => choice.label));
+  if (
+    uniqueChoices.length < 2 ||
+    !uniqueChoices.some((label) => normalizeText(label) === normalizeText(correct[0]!.label))
+  ) {
+    return null;
+  }
+
+  const seed = hashText(`${question.promptText}|${question.answerText}|oak`);
+  const rotated = rotateToSeed(uniqueChoices, seed);
+  const padded = rotated.length >= 2 ? rotated : padAuthoredChoices(rotated, correct[0]!.label);
+  const correctIndex = padded.findIndex(
+    (label) => normalizeText(label) === normalizeText(correct[0]!.label)
+  );
+
+  return {
+    choices: padded.map((label, index) => ({ key: choiceKey(index), label })),
+    correctChoiceKey: choiceKey(Math.max(0, correctIndex)),
+  };
+}
+
+function rotateToSeed<T>(items: T[], seed: number): T[] {
+  if (!items.length) return items;
+  const offset = seed % items.length;
+  return [...items.slice(offset), ...items.slice(0, offset)];
+}
+
+function padAuthoredChoices(choices: string[], correctAnswer: string): string[] {
+  const out = [...choices];
+  const fallback = ["I am not sure", "None of these", "All of these", correctAnswer];
+  for (const item of fallback) {
+    if (out.length >= 4) break;
+    if (!out.some((choice) => normalizeText(choice) === normalizeText(item))) {
+      out.push(item);
+    }
+  }
+  return out.slice(0, 4);
 }
 
 export function ensureMultipleChoiceQuestion(question: RuntimeQuestion): RuntimeQuestion {
   if (
+    typeof (question as any).responseKind === "string" &&
     Array.isArray((question as any).choices) &&
-    (question as any).choices.length === 4 &&
     typeof (question as any).correctChoiceKey === "string"
   ) {
     return question;
@@ -792,6 +1299,11 @@ export function ensureMultipleChoiceQuestion(question: RuntimeQuestion): Runtime
     promptText: question.promptText,
     answerText: question.answerText,
     answerMode: question.answerMode,
+    itemType:
+      typeof question.contentJson?.itemType === "string"
+        ? String(question.contentJson.itemType)
+        : null,
+    contentJson: question.contentJson,
   });
 
   return {
@@ -1107,25 +1619,53 @@ function yearDistance(a: number, b: number): number {
 }
 
 export function buildRuntimeQuestion(row: AssessmentPoolRow): RuntimeQuestion {
-  const yearGroup = safeYear(row.yearGroup, 4);
-  const strand = inferStrand({
-    title: row.title,
-    code: row.code,
-    statement: row.statement,
-    strand: row.strand,
+  const yearGroup = safeYear(row.yearGroup);
+  const promptText = normalizePromptForAssessment(row.promptText);
+  const answerText = getAssessmentAnswerText(row.answerText, row.contentJson);
+  const responseKind = getResponseKind({
+    itemType: row.itemType,
     contentJson: row.contentJson,
   });
-  const answerMode = inferAnswerMode(row.promptText, row.answerText, row.itemType);
+  const answerContract = getAnswerContract(row.contentJson) ?? undefined;
+  const immutableAnswers = getImmutableAnswers(row.contentJson);
+  const strand = cleanAssessmentStrand(row.strand)
+    ? normaliseAssessmentStrand(row.strand!)
+    : inferStrand({
+        subject: row.subject,
+        title: row.title,
+        code: row.code,
+        statement: row.statement,
+        strand: row.strand,
+        contentJson: row.contentJson,
+      });
+  const answerMode = inferAnswerMode(promptText, answerText, row.itemType);
   const calculatorAllowed = inferCalculatorAllowed({
-    promptText: row.promptText,
+    promptText,
     yearGroup,
     difficulty: row.difficulty,
   });
-  const multipleChoice = buildMultipleChoiceChoices({
-    promptText: row.promptText,
-    answerText: row.answerText,
-    answerMode,
-  });
+  const optionBank = getOptionBank(row.contentJson);
+  const matchPairs = getMatchPairs(row.contentJson);
+  const orderedAnswers = getOrderedAnswers(row.contentJson);
+  const multipleChoice =
+    responseKind === "single_choice"
+      ? buildMultipleChoiceChoices({
+          promptText,
+          answerText,
+          answerMode,
+          itemType: row.itemType,
+          contentJson: row.contentJson,
+        })
+      : {
+          choices: choicesFromLabels(
+            responseKind === "order" ? optionBank : responseKind === "multi_select" ? optionBank : []
+          ),
+          correctChoiceKey: "",
+        };
+  const correctChoiceKeys = getCorrectChoiceKeys(
+    multipleChoice.choices,
+    immutableAnswers.length > 0 ? immutableAnswers : [answerText]
+  );
 
   return {
     id: row.id,
@@ -1135,18 +1675,23 @@ export function buildRuntimeQuestion(row: AssessmentPoolRow): RuntimeQuestion {
     statement: row.statement,
     yearGroup,
     strand,
-    promptText: row.promptText,
-    answerText: row.answerText,
+    promptText,
+    answerText,
     difficulty: row.difficulty,
     answerMode,
+    answerContract,
+    responseKind,
     calculatorAllowed,
     inputHelp: inferInputHelp({
       answerMode,
-      promptText: row.promptText,
+      promptText,
       calculatorAllowed,
     }),
     choices: multipleChoice.choices,
-    correctChoiceKey: multipleChoice.correctChoiceKey,
+    correctChoiceKey: multipleChoice.correctChoiceKey || correctChoiceKeys[0] || "",
+    correctChoiceKeys,
+    matchPairs,
+    orderedAnswers,
     contentJson: row.contentJson,
   };
 }
@@ -1164,14 +1709,13 @@ export function buildRuntimeQuestionPool(rows: AssessmentPoolRow[]): RuntimeQues
   });
 }
 
-function makeEmptyStrandStats(entryYear: number): Record<AssessmentStrand, StrandStats> {
-  return {
-    NUMBER: emptySingleStrand("NUMBER", entryYear),
-    ALGEBRA: emptySingleStrand("ALGEBRA", entryYear),
-    RATIO: emptySingleStrand("RATIO", entryYear),
-    GEOMETRY: emptySingleStrand("GEOMETRY", entryYear),
-    DATA: emptySingleStrand("DATA", entryYear),
-  };
+function makeEmptyStrandStats(
+  entryYear: number,
+  activeStrands: AssessmentStrand[] = MATHS_CORE_STRANDS
+): Record<AssessmentStrand, StrandStats> {
+  return Object.fromEntries(
+    activeStrands.map((strand) => [strand, emptySingleStrand(strand, entryYear)])
+  ) as Record<AssessmentStrand, StrandStats>;
 }
 
 function emptySingleStrand(strand: AssessmentStrand, entryYear: number): StrandStats {
@@ -1253,6 +1797,7 @@ function dedupe<T>(items: T[]): T[] {
 }
 
 export function createAssessmentSession(params: {
+  subject?: Subject;
   childCurrentYear: number;
   questions: RuntimeQuestion[];
   maxQuestions?: number;
@@ -1265,7 +1810,7 @@ export function createAssessmentSession(params: {
 
   const session: AssessmentSession = {
     sessionId: makeId(),
-    subject: "MATHS",
+    subject: params.subject ?? Subject.MATHS,
     childCurrentYear: params.childCurrentYear,
     entryYear,
     minimumYear,
@@ -1279,9 +1824,10 @@ export function createAssessmentSession(params: {
     responses: [],
     skippedQuestions: [],
     currentBandYear: entryYear,
-    minimumBandYear: Math.max(1, entryYear - 2),
+    minimumBandYear: Math.max(1, entryYear - 1),
+    maximumBandYear: Math.min(params.childCurrentYear, maximumYear),
     bandStartedAtResponseCount: 0,
-    strands: makeEmptyStrandStats(entryYear),
+    strands: makeEmptyStrandStats(entryYear, activeStrands),
     initialQueue: buildInitialQueue(params.questions, entryYear, activeStrands),
     isComplete: false,
     overallConfidence: 0,
@@ -1314,8 +1860,13 @@ export function getNextQuestion(
     remainingById.filter((q) => !askedSignatures.has(questionSignature(q)));
 
   const candidatePool = remaining.length > 0 ? remaining : remainingById;
+  const windowedCandidatePool = candidatePool.filter(
+    (q) =>
+      q.yearGroup >= session.minimumBandYear &&
+      q.yearGroup <= session.maximumBandYear
+  );
 
-  if (candidatePool.length === 0) {
+  if (windowedCandidatePool.length === 0) {
     session.isComplete = true;
     session.completionReason = "NO_MORE_QUESTIONS";
     session.completedAt = new Date().toISOString();
@@ -1328,44 +1879,67 @@ export function getNextQuestion(
     session.strands[targetStrand],
     targetYear
   );
+  const targetYearStats = session.strands[targetStrand].byYear[targetYear] ?? {
+    asked: 0,
+    correct: 0,
+  };
+  const targetYearAccuracy =
+    targetYearStats.asked > 0 ? targetYearStats.correct / targetYearStats.asked : 0;
+  const weakAtCurrentBand =
+    targetYearStats.asked >= 2 && targetYearAccuracy < 0.5;
+  const strongAtCurrentBand =
+    targetYearStats.asked >= 3 && targetYearAccuracy >= 0.75;
+  const preferredAdjacentYear = weakAtCurrentBand
+    ? getAdjacentAvailableYear(session, "down")
+    : strongAtCurrentBand
+    ? getAdjacentAvailableYear(session, "up")
+    : null;
 
-  const strictBucket = candidatePool.filter(
+  const strictBucket = windowedCandidatePool.filter(
     (q) =>
       q.strand === targetStrand &&
       q.yearGroup === targetYear &&
       q.difficulty === targetDifficulty
   );
 
-  const relaxedDifficultyBucket = candidatePool.filter(
+  const relaxedDifficultyBucket = windowedCandidatePool.filter(
     (q) =>
       q.strand === targetStrand &&
       q.yearGroup === targetYear &&
       difficultyDistance(q.difficulty, targetDifficulty) <= 1
   );
 
-  const targetYearBucket = candidatePool.filter(
+  const targetYearBucket = windowedCandidatePool.filter(
     (q) => q.strand === targetStrand && q.yearGroup === targetYear
   );
 
-  const relaxedYearBucket = candidatePool.filter(
+  const preferredAdjacentBucket =
+    preferredAdjacentYear == null
+      ? []
+      : windowedCandidatePool.filter(
+          (q) => q.strand === targetStrand && q.yearGroup === preferredAdjacentYear
+        );
+
+  const relaxedYearBucket = windowedCandidatePool.filter(
     (q) =>
       q.strand === targetStrand &&
       yearDistance(q.yearGroup, targetYear) <= 1
   );
 
-  const strandBucket = candidatePool.filter((q) => q.strand === targetStrand);
+  const strandBucket = windowedCandidatePool.filter((q) => q.strand === targetStrand);
 
   return (
     chooseQuestionFromBucket(session, strictBucket) ??
     chooseQuestionFromBucket(session, relaxedDifficultyBucket) ??
     chooseQuestionFromBucket(session, targetYearBucket) ??
-    chooseQuestionFromBucket(session, strandBucket) ??
+    chooseQuestionFromBucket(session, preferredAdjacentBucket) ??
     chooseQuestionFromBucket(session, relaxedYearBucket) ??
+    chooseQuestionFromBucket(session, strandBucket) ??
     chooseQuestionFromBucket(
       session,
-      candidatePool.filter((q) => q.yearGroup === targetYear)
+      windowedCandidatePool.filter((q) => q.yearGroup === targetYear)
     ) ??
-    chooseQuestionFromBucket(session, candidatePool)
+    chooseQuestionFromBucket(session, windowedCandidatePool)
   );
 }
 
@@ -1451,7 +2025,12 @@ function getAdjacentAvailableYear(
 ): number | null {
   const years = getAvailableSessionYears(session);
   if (direction === "up") {
-    return years.find((year) => year > session.currentBandYear && year <= 11) ?? null;
+    return (
+      years.find(
+        (year) =>
+          year > session.currentBandYear && year <= session.maximumBandYear
+      ) ?? null
+    );
   }
 
   const lower = years.filter(
@@ -1489,8 +2068,16 @@ function questionsNeededForCurrentBand(session: AssessmentSession): number {
 }
 
 function moveToBandYear(session: AssessmentSession, nextYear: number) {
-  session.currentBandYear = clamp(nextYear, 1, Math.min(11, session.maximumYear));
+  session.currentBandYear = clamp(
+    nextYear,
+    session.minimumBandYear,
+    session.maximumBandYear
+  );
   session.bandStartedAtResponseCount = session.responses.length;
+}
+
+function minimumQuestionsForConfidenceStop(session: AssessmentSession): number {
+  return Math.max(12, getEffectiveStrands(session).length * 2 + 2);
 }
 
 function applyBandProgression(session: AssessmentSession) {
@@ -1533,6 +2120,9 @@ export function submitAnswer(
     questionId: string;
     rawAnswer?: string;
     selectedChoiceKey?: AssessmentChoiceKey;
+    selectedChoiceKeys?: AssessmentChoiceKey[];
+    matchPairs?: AssessmentMatchPair[];
+    orderedAnswers?: string[];
   }
 ): {
   isCorrect: boolean;
@@ -1564,8 +2154,23 @@ export function submitAnswer(
     params.selectedChoiceKey != null
       ? question.choices.find((choice) => choice.key === params.selectedChoiceKey) ?? null
       : null;
-  const rawAnswer = params.rawAnswer ?? selectedChoice?.label ?? "";
-  const isCorrect = markAnswer(question, rawAnswer, params.selectedChoiceKey);
+  const selectedChoices =
+    params.selectedChoiceKeys
+      ?.map((key) => question.choices.find((choice) => choice.key === key) ?? null)
+      .filter((choice): choice is AssessmentChoice => choice !== null) ?? [];
+  const derivedAnswer =
+    selectedChoices.map((choice) => choice.label).join(" | ") ||
+    selectedChoice?.label ||
+    params.matchPairs?.map((pair) => `${pair.left} -> ${pair.right}`).join("; ") ||
+    params.orderedAnswers?.join(" -> ") ||
+    "";
+  const rawAnswer = params.rawAnswer ?? derivedAnswer;
+  const isCorrect = markAnswer(question, rawAnswer, {
+    selectedChoiceKey: params.selectedChoiceKey,
+    selectedChoiceKeys: params.selectedChoiceKeys,
+    matchPairs: params.matchPairs,
+    orderedAnswers: params.orderedAnswers,
+  });
 
   session.askedQuestionIds.push(question.id);
   session.responses.push({
@@ -1574,6 +2179,9 @@ export function submitAnswer(
     isCorrect,
     submittedAt: new Date().toISOString(),
     selectedChoiceKey: params.selectedChoiceKey,
+    selectedChoiceKeys: params.selectedChoiceKeys,
+    matchPairs: params.matchPairs,
+    orderedAnswers: params.orderedAnswers,
     yearGroup: question.yearGroup,
     strand: question.strand,
     difficulty: question.difficulty,
@@ -1593,7 +2201,11 @@ export function submitAnswer(
       session.completionReason = "EXTENSION_MAX_REACHED";
       session.completedAt = new Date().toISOString();
     } else if (total >= session.maxQuestions) {
-      if (session.overallConfidence >= 0.8 && allCoreStrandsMeasured(session)) {
+      if (
+        total >= minimumQuestionsForConfidenceStop(session) &&
+        session.overallConfidence >= 0.8 &&
+        allCoreStrandsMeasured(session)
+      ) {
         session.isComplete = true;
         session.completionReason = "CONFIDENCE_REACHED";
         session.completedAt = new Date().toISOString();
@@ -1602,7 +2214,11 @@ export function submitAnswer(
         session.completionReason = "MAX_REACHED";
         session.completedAt = new Date().toISOString();
       }
-    } else if (session.overallConfidence >= 0.86 && allCoreStrandsMeasured(session)) {
+    } else if (
+      total >= minimumQuestionsForConfidenceStop(session) &&
+      session.overallConfidence >= 0.86 &&
+      allCoreStrandsMeasured(session)
+    ) {
       session.isComplete = true;
       session.completionReason = "CONFIDENCE_REACHED";
       session.completedAt = new Date().toISOString();
@@ -1636,7 +2252,9 @@ function needsExtension(session: AssessmentSession): boolean {
 }
 
 export function recalculateAssessmentSession(session: AssessmentSession): void {
-  session.strands = makeEmptyStrandStats(session.entryYear);
+  const activeStrands = getActiveStrandsFromQuestions(session.questions);
+  session.activeStrands = activeStrands;
+  session.strands = makeEmptyStrandStats(session.entryYear, activeStrands);
 
   const questionMap = new Map(session.questions.map((q) => [q.id, q]));
 
@@ -1644,7 +2262,9 @@ export function recalculateAssessmentSession(session: AssessmentSession): void {
     const question = questionMap.get(response.questionId);
     if (!question) continue;
 
-    const s = session.strands[question.strand];
+    const s =
+      session.strands[question.strand] ??
+      (session.strands[question.strand] = emptySingleStrand(question.strand, session.entryYear));
     s.asked += 1;
     if (response.isCorrect) s.correct += 1;
 
@@ -1667,14 +2287,20 @@ export function recalculateAssessmentSession(session: AssessmentSession): void {
     );
   }
 
-  const effectiveStrands = getEffectiveStrands(session);
-  const confidences = effectiveStrands.map(
-    (strand) => session.strands[strand].confidence
-  );
-  session.overallConfidence =
-    confidences.length > 0
-      ? confidences.reduce((sum, c) => sum + c, 0) / confidences.length
-      : 0;
+  if (session.subject === Subject.SCIENCE && session.responses.length > 0) {
+    session.overallConfidence =
+      session.responses.filter((response) => response.isCorrect).length /
+      session.responses.length;
+  } else {
+    const reportableStrands = getReportableStrands(session);
+    const confidences = reportableStrands.map(
+      (strand) => session.strands[strand].confidence
+    );
+    session.overallConfidence =
+      confidences.length > 0
+        ? confidences.reduce((sum, c) => sum + c, 0) / confidences.length
+        : 0;
+  }
 
   session.overallWorkingBand = inferOverallWorkingBand(session);
 }
@@ -1717,31 +2343,22 @@ function updateStrandEstimate(
   stats.currentTargetYear = clamp(targetYear, minimumYear, maximumYear);
 
   let secureYear: number | null = null;
+  let emergingYear: number | null = null;
+
   for (let year = minimumYear; year <= maximumYear; year += 1) {
     const yearStats = stats.byYear[year] ?? { asked: 0, correct: 0 };
     const accuracy = yearStats.asked > 0 ? yearStats.correct / yearStats.asked : 0;
 
     if (yearStats.asked >= 2 && accuracy >= 0.75) {
       secureYear = year;
-      continue;
     }
-
-    if (year <= stats.currentTargetYear) {
-      break;
-    }
-  }
-  stats.secureYear = secureYear;
-
-  let emergingYear: number | null = null;
-  for (let year = maximumYear; year >= minimumYear; year -= 1) {
-    const yearStats = stats.byYear[year] ?? { asked: 0, correct: 0 };
-    const accuracy = yearStats.asked > 0 ? yearStats.correct / yearStats.asked : 0;
 
     if (yearStats.asked >= 2 && accuracy >= 0.6) {
       emergingYear = year;
-      break;
     }
   }
+
+  stats.secureYear = secureYear;
   stats.emergingYear =
     emergingYear != null && emergingYear > (stats.secureYear ?? minimumYear - 1)
       ? emergingYear
@@ -1755,8 +2372,12 @@ function updateStrandEstimate(
 function inferOverallWorkingBand(
   session: AssessmentSession
 ): AssessmentSession["overallWorkingBand"] {
+  if (session.subject === Subject.SCIENCE) {
+    return inferScienceOverallWorkingBand(session);
+  }
+
   const entryYear = session.entryYear;
-  const effectiveStrands = getEffectiveStrands(session);
+  const effectiveStrands = getReportableStrands(session);
   const strands = effectiveStrands.map((s) => session.strands[s]);
   const strandCount = strands.length;
 
@@ -1809,6 +2430,64 @@ function inferOverallWorkingBand(
   }
 
   return "INSUFFICIENT_EVIDENCE";
+}
+
+function inferScienceOverallWorkingBand(
+  session: AssessmentSession
+): AssessmentSession["overallWorkingBand"] {
+  if (session.responses.length < 6) {
+    return "INSUFFICIENT_EVIDENCE";
+  }
+
+  const byYear = new Map<number, { asked: number; correct: number }>();
+  let correct = 0;
+
+  for (const response of session.responses) {
+    const yearStats = byYear.get(response.yearGroup) ?? { asked: 0, correct: 0 };
+    yearStats.asked += 1;
+    if (response.isCorrect) {
+      yearStats.correct += 1;
+      correct += 1;
+    }
+    byYear.set(response.yearGroup, yearStats);
+  }
+
+  const totalAccuracy = correct / session.responses.length;
+  const entryStats = byYear.get(session.entryYear) ?? { asked: 0, correct: 0 };
+  const nextStats = byYear.get(session.entryYear + 1) ?? { asked: 0, correct: 0 };
+  const entryAccuracy =
+    entryStats.asked > 0 ? entryStats.correct / entryStats.asked : totalAccuracy;
+  const nextAccuracy = nextStats.asked > 0 ? nextStats.correct / nextStats.asked : 0;
+  const entryOrAbove = Array.from(byYear.entries()).reduce(
+    (acc, [year, stats]) => {
+      if (year >= session.entryYear) {
+        acc.asked += stats.asked;
+        acc.correct += stats.correct;
+      }
+      return acc;
+    },
+    { asked: 0, correct: 0 }
+  );
+  const entryOrAboveAccuracy =
+    entryOrAbove.asked > 0 ? entryOrAbove.correct / entryOrAbove.asked : totalAccuracy;
+
+  if (totalAccuracy < 0.45 || entryOrAboveAccuracy < 0.5) return "BELOW_ENTRY";
+  if (nextStats.asked >= 4 && nextAccuracy >= 0.8) return "NEXT_SECURE";
+  if (nextStats.asked >= 4 && nextAccuracy >= 0.65 && totalAccuracy >= 0.65) {
+    return "NEXT_DEVELOPING";
+  }
+  if (
+    entryStats.asked >= 4 &&
+    entryAccuracy >= 0.65 &&
+    nextStats.asked > 0
+  ) {
+    return "ENTRY_SECURE_NEXT_EMERGING";
+  }
+  if (entryOrAbove.asked >= 6 && entryOrAboveAccuracy >= 0.65) {
+    return "ENTRY_SECURE";
+  }
+
+  return "BELOW_ENTRY";
 }
 
 function normalizeBasic(s: string): string {
@@ -1898,13 +2577,56 @@ function normalizeAlgebra(s: string): string {
     .replace(/\+\-/g, "-");
 }
 
+function sameNormalizedSet(left: string[], right: string[]): boolean {
+  const a = left.map(normalizeText).sort();
+  const b = right.map(normalizeText).sort();
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
 function markAnswer(
   question: RuntimeQuestion,
   rawAnswer: string,
-  selectedChoiceKey?: AssessmentChoiceKey
+  structured?: {
+    selectedChoiceKey?: AssessmentChoiceKey;
+    selectedChoiceKeys?: AssessmentChoiceKey[];
+    matchPairs?: AssessmentMatchPair[];
+    orderedAnswers?: string[];
+  }
 ): boolean {
-  if (selectedChoiceKey != null) {
-    return selectedChoiceKey === question.correctChoiceKey;
+  if (question.responseKind === "single_choice" && structured?.selectedChoiceKey != null) {
+    return structured.selectedChoiceKey === question.correctChoiceKey;
+  }
+
+  if (question.responseKind === "multi_select") {
+    return sameNormalizedSet(
+      structured?.selectedChoiceKeys ?? [],
+      question.correctChoiceKeys ?? []
+    );
+  }
+
+  if (question.responseKind === "match") {
+    const expectedPairs = question.matchPairs ?? [];
+    const submittedPairs = structured?.matchPairs ?? [];
+
+    return sameNormalizedSet(
+      submittedPairs.map((pair) => `${pair.left}->${pair.right}`),
+      expectedPairs.map((pair) => `${pair.left}->${pair.right}`)
+    );
+  }
+
+  if (question.responseKind === "order") {
+    const expected = question.orderedAnswers ?? [];
+    const submitted = structured?.orderedAnswers ?? [];
+
+    return (
+      submitted.length === expected.length &&
+      submitted.every((answer, index) => normalizeText(answer) === normalizeText(expected[index]))
+    );
+  }
+
+  const immutableAnswers = getImmutableAnswers(question.contentJson);
+  if (question.responseKind === "short_answer" && immutableAnswers.length > 0) {
+    return immutableAnswers.some((answer) => answerMaskMatches(answer, rawAnswer));
   }
 
   const expected = question.answerText;
@@ -1931,6 +2653,8 @@ function markAnswer(
         return Math.abs(rawN - expN) < 0.000001;
       }
 
+      if (answerMaskMatches(expected, rawAnswer)) return true;
+
       return normalizeBasic(rawAnswer) === normalizeBasic(expected);
     }
 
@@ -1956,6 +2680,7 @@ function markAnswer(
     }
 
     default:
+      if (answerMaskMatches(expected, rawAnswer)) return true;
       return normalizeBasic(rawAnswer) === normalizeBasic(expected);
   }
 }
@@ -1963,7 +2688,7 @@ function markAnswer(
 export function buildAssessmentResult(
   session: AssessmentSession
 ): AssessmentResult {
-  const strandResults = getEffectiveStrands(session).map((strand) => {
+  const strandResults = getReportableStrands(session).map((strand) => {
     const s = session.strands[strand];
     return {
       strand,
@@ -1988,7 +2713,7 @@ export function buildAssessmentResult(
 
 function buildSummary(session: AssessmentSession): string {
   const parts: string[] = [];
-  const effectiveStrands = getEffectiveStrands(session);
+  const effectiveStrands = getReportableStrands(session);
 
   switch (session.overallWorkingBand) {
     case "BELOW_ENTRY":

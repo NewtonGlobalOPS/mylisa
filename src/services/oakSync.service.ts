@@ -33,6 +33,7 @@ import type {
 import crypto from "node:crypto";
 import type {
   ChunkType,
+  CurriculumObjective,
   DifficultyBand,
   KeyStage,
   Subject,
@@ -50,6 +51,42 @@ const TRANSCRIPT_MAX_CHUNKS = Number(
   process.env.OAK_SYNC_TRANSCRIPT_MAX_CHUNKS ?? "20",
 );
 const DEFAULT_OAK_SUBJECTS = ["maths", "science", "computing", "english"];
+
+type OakSubjectDetail = OakSubjectListItem | {
+  subjectTitle: string;
+  subjectSlug: string;
+  sequenceSlugs: Array<{
+    sequenceSlug: string;
+    years?: Array<number>;
+    keyStages?: Array<{ keyStageSlug: string; keyStageTitle: string }>;
+    phaseSlug?: string;
+    phaseTitle?: string;
+  }>;
+  years?: Array<number>;
+  keyStages?: Array<{ keyStageSlug: string; keyStageTitle: string }>;
+};
+
+type SyncedObjective = Pick<
+  CurriculumObjective,
+  "id" | "code" | "strandId" | "strand" | "title" | "statement"
+>;
+
+type OakLessonQuiz = {
+  lessonTitle?: string;
+  lessonSlug?: string;
+  starterQuiz?: any[];
+  exitQuiz?: any[];
+};
+
+type OakLessonAssets = {
+  oakUrl?: string;
+  attribution?: string[];
+  assets?: Array<{
+    type?: string;
+    label?: string;
+    url?: string;
+  }>;
+};
 
 function now() {
   return Date.now();
@@ -123,6 +160,37 @@ function objectiveCode(
   statement: string,
 ) {
   return `oak:${subjectSlug}:${keyStageSlug}:${unitSlug}:${sha1(statement)}`;
+}
+
+async function fetchOakSubjectDetails(
+  wantedSubjects: string[],
+): Promise<OakSubjectDetail[]> {
+  const rawSubjects = await oakGet<Array<string | OakSubjectListItem>>("/subjects");
+  const subjectSlugs = rawSubjects
+    .map((subject) =>
+      typeof subject === "string" ? subject : String(subject.subjectSlug ?? ""),
+    )
+    .map(normalizeOakSubjectSlug)
+    .filter((slug) => wantedSubjects.includes(slug));
+
+  const details: OakSubjectDetail[] = [];
+  for (const slug of subjectSlugs) {
+    const existing = rawSubjects.find(
+      (subject) =>
+        typeof subject !== "string" &&
+        normalizeOakSubjectSlug(subject.subjectSlug) === slug &&
+        Array.isArray(subject.sequenceSlugs),
+    );
+    if (existing && typeof existing !== "string") {
+      details.push(existing);
+      continue;
+    }
+
+    const detail = await oakGet<OakSubjectDetail>(`/subjects/${slug}`);
+    details.push(detail);
+  }
+
+  return details;
 }
 
 // Deterministic chunk id; supports suffix so transcript chunks can be multiple.
@@ -283,6 +351,7 @@ function normalizeSequenceUnitItem(u: any): {
 }
 
 function compactTextFromLessonSummary(s: OakLessonSummary) {
+  const raw = s as any;
   const lines: string[] = [];
   lines.push(`Lesson: ${s.lessonTitle}`);
   lines.push(`Unit: ${s.unitTitle}`);
@@ -304,17 +373,138 @@ function compactTextFromLessonSummary(s: OakLessonSummary) {
     }
   }
 
-  if (s.misconceptions?.length) {
+  const keyLearningPoints = Array.isArray(raw.keyLearningPoints)
+    ? raw.keyLearningPoints
+    : [];
+  if (keyLearningPoints.length) {
+    lines.push("Key learning points:");
+    for (const point of keyLearningPoints) {
+      const body = String(point?.keyLearningPoint ?? point?.text ?? point ?? "").trim();
+      if (body) lines.push(`- ${body}`);
+    }
+  }
+
+  if (raw.pupilLessonOutcome) {
+    lines.push(`Outcome: ${String(raw.pupilLessonOutcome).trim()}`);
+  }
+
+  const misconceptionItems = Array.isArray(s.misconceptions)
+    ? s.misconceptions
+    : Array.isArray(raw.misconceptionsAndCommonMistakes)
+      ? raw.misconceptionsAndCommonMistakes
+      : [];
+  if (misconceptionItems.length) {
     lines.push("Misconceptions:");
-    for (const m of s.misconceptions) {
+    for (const m of misconceptionItems) {
       const a = (m.misconception ?? "").trim();
-      const b = (m.teacherResponse ?? m.pupilLessonOutcome ?? "").trim();
+      const b = (m.teacherResponse ?? m.response ?? m.pupilLessonOutcome ?? "").trim();
       const joined = [a, b].filter(Boolean).join(" — ");
       if (joined) lines.push(`- ${joined}`);
     }
   }
 
   return lines.join("\n");
+}
+
+function textTokens(value: string): Set<string> {
+  const stop = new Set([
+    "and",
+    "the",
+    "with",
+    "from",
+    "that",
+    "this",
+    "into",
+    "including",
+    "appropriate",
+    "using",
+    "through",
+    "their",
+    "where",
+    "which",
+    "will",
+    "data",
+  ]);
+  return new Set(
+    value
+      .toLowerCase()
+      .split(/[^a-z0-9]+/g)
+      .filter((token) => token.length >= 4 && !stop.has(token)),
+  );
+}
+
+function lessonMatchText(
+  lessonSummary: OakLessonSummary,
+  transcript: OakLessonTranscript | null,
+) {
+  const raw = lessonSummary as any;
+  return [
+    lessonSummary.lessonTitle,
+    raw.pupilLessonOutcome,
+    ...(raw.lessonKeywords ?? []).flatMap((item: any) => [
+      item?.keyword,
+      item?.description,
+    ]),
+    ...(raw.keyLearningPoints ?? []).map((item: any) => item?.keyLearningPoint ?? item?.text),
+    ...(raw.misconceptionsAndCommonMistakes ?? []).flatMap((item: any) => [
+      item?.misconception,
+      item?.response,
+    ]),
+    transcript?.transcript?.slice(0, 4000),
+  ]
+    .filter(Boolean)
+    .map(String)
+    .join("\n");
+}
+
+function chooseObjectiveForLesson(input: {
+  objectives: SyncedObjective[];
+  lessonSummary: OakLessonSummary;
+  transcript: OakLessonTranscript | null;
+}): SyncedObjective | null {
+  if (!input.objectives.length) return null;
+  if (input.objectives.length === 1) return input.objectives[0];
+
+  const lessonText = lessonMatchText(input.lessonSummary, input.transcript);
+  const lessonTokens = textTokens(lessonText);
+  const lowerLessonText = lessonText.toLowerCase();
+
+  let best: { objective: SyncedObjective; score: number } | null = null;
+  for (const objective of input.objectives) {
+    const objectiveText = [objective.title, objective.statement].join("\n");
+    const objectiveTokens = textTokens(objectiveText);
+    let score = 0;
+    for (const token of objectiveTokens) {
+      if (lessonTokens.has(token)) score += 2;
+    }
+
+    const lowerObjectiveText = objectiveText.toLowerCase();
+    for (const phrase of [
+      "scatter graph",
+      "bivariate",
+      "correlation",
+      "frequency table",
+      "bar chart",
+      "pie chart",
+      "pictogram",
+      "vertical line",
+      "grouped numerical",
+      "mean",
+      "median",
+      "mode",
+      "range",
+      "central tendency",
+      "distribution",
+    ]) {
+      if (lowerLessonText.includes(phrase) && lowerObjectiveText.includes(phrase)) {
+        score += 12;
+      }
+    }
+
+    if (!best || score > best.score) best = { objective, score };
+  }
+
+  return best?.objective ?? input.objectives[0];
 }
 
 function compactTextFromQuiz(q: any) {
@@ -333,6 +523,75 @@ function compactTextFromQuiz(q: any) {
     for (const item of arr) {
       const question = String(item?.question ?? "").trim();
       if (question) lines.push(`Q: ${question}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function quizQuestionCount(q: any) {
+  return (
+    (Array.isArray(q?.starterQuiz) ? q.starterQuiz.length : 0) +
+    (Array.isArray(q?.exitQuiz) ? q.exitQuiz.length : 0)
+  );
+}
+
+async function fetchLessonQuizFallback(
+  lessonSlug: string,
+  lessonTitle?: string,
+): Promise<OakLessonQuiz | null> {
+  try {
+    const quiz = await oakGet<OakLessonQuiz>(`/lessons/${lessonSlug}/quiz`);
+    if (quizQuestionCount(quiz) === 0) return null;
+    return {
+      ...quiz,
+      lessonSlug,
+      lessonTitle: quiz.lessonTitle ?? lessonTitle ?? lessonSlug,
+    };
+  } catch (e: any) {
+    if (DEBUG) {
+      console.warn(
+        `[oak]    quiz unavailable lessonSlug=${lessonSlug} err=${e?.message ?? e}`,
+      );
+    }
+    return null;
+  }
+}
+
+async function fetchLessonAssets(
+  lessonSlug: string,
+): Promise<OakLessonAssets | null> {
+  try {
+    const assets = await oakGet<OakLessonAssets>(`/lessons/${lessonSlug}/assets`);
+    if (!Array.isArray(assets.assets) || assets.assets.length === 0) return null;
+    return assets;
+  } catch (e: any) {
+    if (DEBUG) {
+      console.warn(
+        `[oak]    assets unavailable lessonSlug=${lessonSlug} err=${e?.message ?? e}`,
+      );
+    }
+    return null;
+  }
+}
+
+function compactTextFromAssets(lessonSlug: string, assets: OakLessonAssets) {
+  const lines: string[] = [];
+  lines.push(`Oak lesson assets for ${lessonSlug}`);
+  if (assets.oakUrl) lines.push(`Oak URL: ${assets.oakUrl}`);
+  if (Array.isArray(assets.attribution) && assets.attribution.length) {
+    lines.push("Attribution:");
+    for (const item of assets.attribution) {
+      const text = String(item ?? "").trim();
+      if (text) lines.push(`- ${text}`);
+    }
+  }
+  lines.push("Available downloads:");
+  for (const asset of assets.assets ?? []) {
+    const type = String(asset.type ?? "").trim();
+    const label = String(asset.label ?? "").trim();
+    const url = String(asset.url ?? "").trim();
+    if (type || label || url) {
+      lines.push(`- ${label || type}${type ? ` (${type})` : ""}${url ? `: ${url}` : ""}`);
     }
   }
   return lines.join("\n");
@@ -617,7 +876,7 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
 
   try {
     const tSubjects = now();
-    const subjects = await oakGet<OakSubjectListItem[]>("/subjects");
+    const subjects = await fetchOakSubjectDetails(wantedSubjects);
     console.log(
       `[oak] subjects fetched count=${subjects.length} in ${ms(now() - tSubjects)}`,
     );
@@ -726,6 +985,7 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
               );
             }
 
+            const unitObjectives: SyncedObjective[] = [];
             for (const statement of statements) {
               const code = objectiveCode(
                 subjectSlug,
@@ -737,7 +997,7 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
               if (DRY_RUN) {
                 stats.skippedWritesDryRun++;
               } else {
-                await prisma.curriculumObjective.upsert({
+                const objective = await prisma.curriculumObjective.upsert({
                   where: {
                     organisationId_code: {
                       organisationId: source.organisationId,
@@ -780,9 +1040,39 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
                     sourceId: source.id,
                   },
                 });
+                unitObjectives.push({
+                  id: objective.id,
+                  code: objective.code,
+                  strandId: objective.strandId,
+                  strand: objective.strand,
+                  title: objective.title,
+                  statement: objective.statement,
+                });
               }
 
               stats.objectives++;
+            }
+
+            if (!unitObjectives.length && !DRY_RUN) {
+              const codes = statements.map((statement) =>
+                objectiveCode(subjectSlug, keyStageSlug, String(u.unitSlug), statement),
+              );
+              unitObjectives.push(
+                ...(await prisma.curriculumObjective.findMany({
+                  where: {
+                    organisationId: source.organisationId,
+                    code: { in: codes },
+                  },
+                  select: {
+                    id: true,
+                    code: true,
+                    strandId: true,
+                    strand: true,
+                    title: true,
+                    statement: true,
+                  },
+                })),
+              );
             }
 
             // Lessons (unitLessons / multiple shapes)
@@ -807,6 +1097,9 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
 
               let lessonSummary: OakLessonSummary | null = null;
               let transcript: OakLessonTranscript | null = null;
+              let lessonAssets: OakLessonAssets | null = null;
+              let lessonQuiz: OakLessonQuiz | null =
+                questionsByLesson.get(lessonSlug) ?? null;
 
               try {
                 lessonSummary = await oakGet<OakLessonSummary>(
@@ -828,6 +1121,17 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
               }
 
               if (!lessonSummary) continue;
+
+              if (!lessonQuiz || quizQuestionCount(lessonQuiz) === 0) {
+                lessonQuiz = await fetchLessonQuizFallback(
+                  lessonSlug,
+                  lessonSummary.lessonTitle,
+                );
+              }
+
+              if ((lessonSummary as any).downloadsAvailable || (lessonSummary as any).downloadsavailable) {
+                lessonAssets = await fetchLessonAssets(lessonSlug);
+              }
 
               // Transcript (optional)
               if (!SKIP_TRANSCRIPT) {
@@ -857,6 +1161,11 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
               const lessonKs = mapOakKsToEnumKeyStage(
                 String((lessonSummary as any).keyStageSlug ?? keyStageSlug),
               );
+              const matchedObjective = chooseObjectiveForLesson({
+                objectives: unitObjectives,
+                lessonSummary,
+                transcript,
+              });
 
               // Prisma-aligned upsert helper (tags + citations required arrays)
               const upsertChunk = async (
@@ -893,8 +1202,13 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
                     subject: lessonSubject,
                     keyStage: lessonKs,
                     yearGroup: yr,
+                    objectiveId: matchedObjective?.id ?? null,
+                    strandId: matchedObjective?.strandId ?? null,
                     strand:
-                      (unitSummary as any).unitTitle ?? u.unitTitle ?? null,
+                      matchedObjective?.strand ??
+                      (unitSummary as any).unitTitle ??
+                      u.unitTitle ??
+                      null,
                     type,
                     difficulty,
                     content,
@@ -910,8 +1224,13 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
                     subject: lessonSubject,
                     keyStage: lessonKs,
                     yearGroup: yr,
+                    objectiveId: matchedObjective?.id ?? null,
+                    strandId: matchedObjective?.strandId ?? null,
                     strand:
-                      (unitSummary as any).unitTitle ?? u.unitTitle ?? null,
+                      matchedObjective?.strand ??
+                      (unitSummary as any).unitTitle ??
+                      u.unitTitle ??
+                      null,
                     type,
                     difficulty,
                     content,
@@ -1002,12 +1321,10 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
               }
 
               // Quiz chunk (questions only)
-              const q = questionsByLesson.get(lessonSlug);
+              const q = lessonQuiz;
               const hasQuiz =
                 !!q &&
-                ((q as any).starterQuiz?.length ?? 0) +
-                  ((q as any).exitQuiz?.length ?? 0) >
-                  0;
+                quizQuestionCount(q) > 0;
 
               if (hasQuiz) {
                 const text = compactTextFromQuiz(q);
@@ -1023,8 +1340,40 @@ export async function syncOakCurriculum(options?: { subjectSlugs?: string[] }) {
                       String((lessonSummary as any).subjectSlug ?? ""),
                       String((lessonSummary as any).keyStageSlug ?? ""),
                     ].filter(Boolean),
-                    [`/sequences/${seq.sequenceSlug}/questions`],
+                    [
+                      `/sequences/${seq.sequenceSlug}/questions`,
+                      `/lessons/${lessonSlug}/quiz`,
+                    ],
                     "quiz",
+                  );
+                }
+              }
+
+              if (lessonAssets) {
+                const text = compactTextFromAssets(lessonSlug, lessonAssets);
+                if (text.trim()) {
+                  await upsertChunk(
+                    "EXPLANATION",
+                    "MEDIUM",
+                    text,
+                    [
+                      "oak",
+                      "lesson",
+                      "assets",
+                      "downloads",
+                      String((lessonSummary as any).subjectSlug ?? ""),
+                      String((lessonSummary as any).keyStageSlug ?? ""),
+                      ...(lessonAssets.assets ?? [])
+                        .map((asset) => String(asset.type ?? "").trim())
+                        .filter(Boolean),
+                    ].filter(Boolean),
+                    [
+                      `/lessons/${lessonSlug}/assets`,
+                      ...(lessonAssets.assets ?? [])
+                        .map((asset) => String(asset.url ?? "").trim())
+                        .filter(Boolean),
+                    ],
+                    "assets",
                   );
                 }
               }

@@ -9,8 +9,10 @@ import {
 } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import {
+  AssessmentNarrativeReport,
   AssessmentResult,
   AssessmentSession,
+  AssessmentMatchPair,
   RuntimeQuestion,
   buildRuntimeQuestionPool,
   createAssessmentSession,
@@ -20,6 +22,7 @@ import {
   submitAnswer,
   buildAssessmentResult,
 } from "./assessmentEngine.js";
+import { buildAssessmentNarrativeReport } from "./assessmentReport.service.js";
 import { reviewAndWrapAssessmentQuestion } from "./assessmentQuestionWrapper.service.js";
 
 type PersistedQuestionMeta = {
@@ -45,12 +48,17 @@ type PresentedAssessmentQuestion = RuntimeQuestion & {
 };
 
 type PersistedAssessmentState = {
-  version: 2;
+  version: 3;
   session: AssessmentSession;
   questionMetaById: Record<string, PersistedQuestionMeta>;
+  report?: AssessmentNarrativeReport | null;
 };
 
 const sessionStore = new Map<string, AssessmentSession>();
+
+function determineNormalizedEntryYear(childCurrentYear: number): number {
+  return Math.max(1, childCurrentYear - 1);
+}
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -75,12 +83,14 @@ function cloneSession(session: AssessmentSession): AssessmentSession {
 
 function serializeState(
   session: AssessmentSession,
-  questionMetaById: Record<string, PersistedQuestionMeta>
+  questionMetaById: Record<string, PersistedQuestionMeta>,
+  report?: AssessmentNarrativeReport | null
 ): PersistedAssessmentState {
   return {
-    version: 2,
+    version: 3,
     session: cloneSession(session),
     questionMetaById,
+    report: report ?? null,
   };
 }
 
@@ -91,20 +101,39 @@ function deserializeState(notes: Prisma.JsonValue): PersistedAssessmentState {
     throw new Error("Persisted assessment state is missing or invalid.");
   }
 
+  const questions = (raw.session.questions ?? []).map((question) =>
+    ensureMultipleChoiceQuestion(question)
+  );
+  const entryYear = determineNormalizedEntryYear(raw.session.childCurrentYear);
+  const minimumBandYear = Math.max(1, entryYear - 1);
+  const maximumBandYear = Math.min(
+    raw.session.childCurrentYear,
+    raw.session.maximumYear ?? raw.session.childCurrentYear
+  );
+  const currentBandYear = Math.max(
+    minimumBandYear,
+    Math.min(raw.session.currentBandYear ?? entryYear, maximumBandYear)
+  );
+
   return {
-    version: 2,
+    version: 3,
     session: {
       ...raw.session,
-      questions: (raw.session.questions ?? []).map((question) =>
-        ensureMultipleChoiceQuestion(question)
-      ),
-      currentBandYear: raw.session.currentBandYear ?? raw.session.entryYear,
-      minimumBandYear:
-        raw.session.minimumBandYear ?? Math.max(1, raw.session.entryYear - 2),
+      subject: raw.session.subject ?? Subject.MATHS,
+      questions,
+      entryYear,
+      currentBandYear,
+      minimumBandYear,
+      maximumBandYear,
       bandStartedAtResponseCount: raw.session.bandStartedAtResponseCount ?? 0,
       skippedQuestions: raw.session.skippedQuestions ?? [],
+      initialQueue: raw.session.initialQueue ?? [],
     },
     questionMetaById: raw.questionMetaById ?? {},
+    report:
+      raw && typeof raw === "object" && "report" in raw
+        ? ((raw.report as AssessmentNarrativeReport | null | undefined) ?? null)
+        : null,
   };
 }
 
@@ -207,6 +236,7 @@ type CanonicalAssessmentRow = {
   difficulty: DifficultyBand;
   contentJson: Prisma.JsonValue | null;
   objective: {
+    subject: Subject;
     code: string;
     title: string;
     statement: string;
@@ -265,9 +295,9 @@ function dedupeCanonicalRows(rows: CanonicalAssessmentRow[]): CanonicalAssessmen
     const shouldReplace =
       incomingRank < existingRank ||
       (incomingRank === existingRank &&
-        (row.objective.yearGroup ?? 999) < (existing.objective.yearGroup ?? 999)) ||
+        (row.objective.yearGroup ?? -1) > (existing.objective.yearGroup ?? -1)) ||
       (incomingRank === existingRank &&
-        (row.objective.yearGroup ?? 999) === (existing.objective.yearGroup ?? 999) &&
+        (row.objective.yearGroup ?? -1) === (existing.objective.yearGroup ?? -1) &&
         row.id < existing.id);
 
     if (shouldReplace) {
@@ -278,19 +308,20 @@ function dedupeCanonicalRows(rows: CanonicalAssessmentRow[]): CanonicalAssessmen
   return Array.from(bySignature.values());
 }
 
-async function buildMathsAssessmentPool(
+async function buildSubjectAssessmentPool(
   organisationId: string,
-  childCurrentYear: number
+  childCurrentYear: number,
+  subject: Subject
 ) {
   const minYear = 1;
-  const maxYear = childCurrentYear + 1;
+  const maxYear = childCurrentYear;
 
   const rawRows = await prisma.canonicalQuestion.findMany({
     where: {
       organisationId,
       status: "ACTIVE",
       objective: {
-        subject: Subject.MATHS,
+        subject,
         yearGroup: { gte: minYear, lte: maxYear },
         isActive: true,
       },
@@ -313,6 +344,7 @@ async function buildMathsAssessmentPool(
       objective: {
         select: {
           code: true,
+          subject: true,
           title: true,
           statement: true,
           yearGroup: true,
@@ -334,6 +366,7 @@ async function buildMathsAssessmentPool(
       id: row.id,
       objectiveId: row.objectiveId,
       itemType: row.itemType,
+      subject: row.objective.subject,
       code: row.objective.code,
       title: row.objective.title,
       statement: row.objective.statement,
@@ -398,6 +431,7 @@ async function loadAttemptState(sessionId: string): Promise<{
   studentId: string;
   session: AssessmentSession;
   questionMetaById: Record<string, PersistedQuestionMeta>;
+  report: AssessmentNarrativeReport | null;
 }> {
   const cached = sessionStore.get(sessionId);
 
@@ -424,6 +458,7 @@ async function loadAttemptState(sessionId: string): Promise<{
       studentId: attempt.studentId,
       session: cached,
       questionMetaById: persisted.questionMetaById,
+      report: persisted.report ?? null,
     };
   }
 
@@ -450,6 +485,7 @@ async function loadAttemptState(sessionId: string): Promise<{
     studentId: attempt.studentId,
     session: persisted.session,
     questionMetaById: persisted.questionMetaById,
+    report: persisted.report ?? null,
   };
 }
 
@@ -457,6 +493,7 @@ async function persistAttemptState(params: {
   attemptId: string;
   session: AssessmentSession;
   questionMetaById: Record<string, PersistedQuestionMeta>;
+  report?: AssessmentNarrativeReport | null;
 }) {
   const asked = params.session.responses.length;
   const correct = params.session.responses.filter((r) => r.isCorrect).length;
@@ -477,7 +514,9 @@ async function persistAttemptState(params: {
       ? new Date(params.session.completedAt ?? new Date().toISOString())
       : null,
     score,
-    JSON.stringify(asJson(serializeState(params.session, params.questionMetaById))),
+    JSON.stringify(
+      asJson(serializeState(params.session, params.questionMetaById, params.report))
+    ),
     params.attemptId
   );
 
@@ -546,6 +585,17 @@ async function presentQuestion(params: {
     if (!question) return null;
 
     const meta = params.questionMetaById[question.id];
+    if (meta?.canonicalQuestionId) {
+      const latest = await prisma.canonicalQuestion.findUnique({
+        where: { id: meta.canonicalQuestionId },
+        select: { contentJson: true },
+      });
+
+      if (latest?.contentJson && typeof latest.contentJson === "object") {
+        question.contentJson = latest.contentJson as Record<string, unknown>;
+      }
+    }
+
     const wrapped = await reviewAndWrapAssessmentQuestion({
       child,
       question,
@@ -605,13 +655,15 @@ function assertQuestionHasNotAlreadyBeenAnswered(
   }
 }
 
-export async function startMathsAssessment(params: {
+export async function startAssessment(params: {
   studentId: string;
   childCurrentYear: number;
+  subject?: Subject;
 }): Promise<{
   session: AssessmentSession;
   firstQuestion: PresentedAssessmentQuestion | null;
 }> {
+  const subject = params.subject ?? Subject.MATHS;
   const organisationId = await getDefaultOrganisationId();
 
   const student = await prisma.student.findFirst({
@@ -631,16 +683,18 @@ export async function startMathsAssessment(params: {
     throw new Error("Student not found for organisation.");
   }
 
-  const { pool, questionMetaById } = await buildMathsAssessmentPool(
+  const { pool, questionMetaById } = await buildSubjectAssessmentPool(
     organisationId,
-    params.childCurrentYear
+    params.childCurrentYear,
+    subject
   );
 
   if (pool.length === 0) {
-    throw new Error("No maths canonical questions available for assessment.");
+    throw new Error(`No ${subject.toLowerCase()} canonical questions available for assessment.`);
   }
 
   const session = createAssessmentSession({
+    subject,
     childCurrentYear: params.childCurrentYear,
     questions: pool,
     maxQuestions: 25,
@@ -651,7 +705,7 @@ export async function startMathsAssessment(params: {
     data: {
       organisationId,
       studentId: student.id,
-      subject: Subject.MATHS,
+      subject,
       taskType: TaskType.ASSESSMENT,
       assessmentContext: AssessmentContext.ASSESSED,
       status: AttemptStatus.STARTED,
@@ -680,11 +734,45 @@ export async function startMathsAssessment(params: {
   };
 }
 
+export async function startMathsAssessment(params: {
+  studentId: string;
+  childCurrentYear: number;
+}) {
+  return startAssessment({ ...params, subject: Subject.MATHS });
+}
+
 export async function getAssessmentSession(
   sessionId: string
-): Promise<AssessmentSession> {
-  const { session } = await loadAttemptState(sessionId);
-  return session;
+): Promise<{
+  session: AssessmentSession;
+  currentQuestion: PresentedAssessmentQuestion | null;
+}> {
+  const {
+    attemptId,
+    studentId,
+    session,
+    questionMetaById,
+    report,
+  } = await loadAttemptState(sessionId);
+
+  const currentQuestion = session.isComplete
+    ? null
+    : await presentQuestion({
+        studentId,
+        session,
+        questionMetaById,
+      });
+
+  if (currentQuestion) {
+    await persistAttemptState({
+      attemptId,
+      session,
+      questionMetaById,
+      report,
+    });
+  }
+
+  return { session, currentQuestion };
 }
 
 export async function reanalyzeMathsAssessmentAttempt(sessionId: string): Promise<{
@@ -733,6 +821,7 @@ export async function reanalyzeMathsAssessmentAttempt(sessionId: string): Promis
     attemptId: attempt.id,
     session,
     questionMetaById: persisted.questionMetaById,
+    report: persisted.report ?? null,
   });
 
   const afterResult = buildAssessmentResult(session);
@@ -769,10 +858,14 @@ export async function reanalyzeMathsAssessmentAttempt(sessionId: string): Promis
   };
 }
 
-export async function answerMathsAssessment(params: {
+export async function answerAssessment(params: {
   sessionId: string;
   questionId: string;
-  selectedChoiceKey: "A" | "B" | "C" | "D";
+  selectedChoiceKey?: string;
+  selectedChoiceKeys?: string[];
+  rawAnswer?: string;
+  matchPairs?: AssessmentMatchPair[];
+  orderedAnswers?: string[];
 }): Promise<{
   isCorrect: boolean;
   correctAnswer: string;
@@ -781,21 +874,33 @@ export async function answerMathsAssessment(params: {
   result?: AssessmentResult;
   session: AssessmentSession;
 }> {
-  const { attemptId, organisationId, studentId, session, questionMetaById } =
-    await loadAttemptState(params.sessionId);
+  const {
+    attemptId,
+    organisationId,
+    studentId,
+    session,
+    questionMetaById,
+    report: persistedReport,
+  } = await loadAttemptState(params.sessionId);
 
   assertQuestionHasNotAlreadyBeenAnswered(session, params.questionId);
 
   const questionBeforeAnswer = findQuestionOrThrow(session, params.questionId);
   const meta = questionMetaById[params.questionId];
   const selectedChoice =
-    questionBeforeAnswer.choices.find(
-      (choice) => choice.key === params.selectedChoiceKey
-    ) ?? null;
+    params.selectedChoiceKey != null
+      ? questionBeforeAnswer.choices.find(
+          (choice) => choice.key === params.selectedChoiceKey
+        ) ?? null
+      : null;
 
   const outcome = submitAnswer(session, {
     questionId: params.questionId,
     selectedChoiceKey: params.selectedChoiceKey,
+    selectedChoiceKeys: params.selectedChoiceKeys,
+    rawAnswer: params.rawAnswer,
+    matchPairs: params.matchPairs,
+    orderedAnswers: params.orderedAnswers,
   });
 
   const nextQuestion = outcome.isComplete
@@ -830,7 +935,7 @@ export async function answerMathsAssessment(params: {
       prompt: meta?.prompt ?? questionBeforeAnswer.promptText,
       type: meta?.type ?? "EQUATION",
       difficulty: meta?.difficulty ?? questionBeforeAnswer.difficulty,
-      response: selectedChoice?.label ?? params.selectedChoiceKey,
+      response: session.responses.at(-1)?.rawAnswer ?? selectedChoice?.label ?? "",
       isCorrect: outcome.isCorrect,
       score: outcome.isCorrect ? 1 : 0,
       errorTags: [],
@@ -838,10 +943,48 @@ export async function answerMathsAssessment(params: {
     },
   });
 
+  let report = persistedReport ?? null;
+
+  if (outcome.isComplete && outcome.result) {
+    const student = await prisma.student.findUnique({
+      where: { id: studentId },
+      select: {
+        firstName: true,
+        lastName: true,
+      },
+    });
+
+    const studentName =
+      [student?.firstName, student?.lastName].filter(Boolean).join(" ") || "The learner";
+    const questionMap = new Map(session.questions.map((question) => [question.id, question]));
+
+    report = await buildAssessmentNarrativeReport({
+      studentName,
+      session,
+      result: outcome.result,
+      questions: session.responses.map((response) => {
+        const question = questionMap.get(response.questionId);
+
+        return {
+          prompt: question?.promptText ?? response.questionId,
+          response: response.rawAnswer,
+          correctAnswer: question?.answerText ?? "",
+          isCorrect: response.isCorrect,
+          strand: response.strand,
+          difficulty: response.difficulty,
+          yearGroup: response.yearGroup,
+        };
+      }),
+    });
+
+    outcome.result.report = report;
+  }
+
   await persistAttemptState({
     attemptId,
     session,
     questionMetaById,
+    report,
   });
 
   return {
@@ -849,4 +992,72 @@ export async function answerMathsAssessment(params: {
     nextQuestion,
     session,
   };
+}
+
+export async function answerMathsAssessment(params: {
+  sessionId: string;
+  questionId: string;
+  selectedChoiceKey?: string;
+  selectedChoiceKeys?: string[];
+  rawAnswer?: string;
+  matchPairs?: AssessmentMatchPair[];
+  orderedAnswers?: string[];
+}) {
+  return answerAssessment(params);
+}
+
+export async function skipAssessmentQuestion(params: {
+  sessionId: string;
+  questionId: string;
+}): Promise<{
+  nextQuestion: PresentedAssessmentQuestion | null;
+  isComplete: boolean;
+  result?: AssessmentResult;
+  session: AssessmentSession;
+}> {
+  const {
+    attemptId,
+    studentId,
+    session,
+    questionMetaById,
+    report,
+  } = await loadAttemptState(params.sessionId);
+
+  assertQuestionHasNotAlreadyBeenAnswered(session, params.questionId);
+  findQuestionOrThrow(session, params.questionId);
+
+  markQuestionSkipped(
+    session,
+    params.questionId,
+    "Learner skipped the question.",
+    "fallback"
+  );
+
+  const nextQuestion = await presentQuestion({
+    studentId,
+    session,
+    questionMetaById,
+  });
+  const result = session.isComplete ? buildAssessmentResult(session) : undefined;
+
+  await persistAttemptState({
+    attemptId,
+    session,
+    questionMetaById,
+    report,
+  });
+
+  return {
+    nextQuestion,
+    isComplete: session.isComplete,
+    result,
+    session,
+  };
+}
+
+export async function skipMathsAssessmentQuestion(params: {
+  sessionId: string;
+  questionId: string;
+}) {
+  return skipAssessmentQuestion(params);
 }

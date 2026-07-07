@@ -21,7 +21,7 @@ export type PublishedCourseCatalog = {
     versionNumber: number;
   } | null;
   modules: PublishedCourseModule[];
-  source: "REMOTE_DB" | "UNCONFIGURED" | "UNSUPPORTED";
+  source: "REMOTE_DB" | "UNCONFIGURED" | "UNSUPPORTED" | "UNAVAILABLE";
 };
 
 let newtonCentrePool: Pool | null = null;
@@ -109,37 +109,50 @@ export async function loadPublishedCourseModules(params: {
     };
   }
 
-  const result = await pool.query<{
-    courseSlug: string;
-    courseTitle: string;
-    courseLevel: string | null;
-    versionNumber: number;
-    moduleId: string;
-    moduleTitle: string;
-    moduleDescription: string | null;
-    sortOrder: number;
-  }>(
-    `
-      SELECT
-        c.slug AS "courseSlug",
-        c.title AS "courseTitle",
-        c.level AS "courseLevel",
-        cv."versionNumber" AS "versionNumber",
-        cm.id AS "moduleId",
-        cm.title AS "moduleTitle",
-        cm.description AS "moduleDescription",
-        cm."sortOrder" AS "sortOrder"
-      FROM "Course" c
-      JOIN "CourseVersion" cv
-        ON cv."courseId" = c.id
-      JOIN "CourseModule" cm
-        ON cm."courseVersionId" = cv.id
-      WHERE c.slug = $1
-        AND cv.status = 'PUBLISHED'
-      ORDER BY cm."sortOrder" ASC
-    `,
-    [slug]
-  );
+  let result;
+  try {
+    result = await pool.query<{
+      courseSlug: string;
+      courseTitle: string;
+      courseLevel: string | null;
+      versionNumber: number;
+      moduleId: string;
+      moduleTitle: string;
+      moduleDescription: string | null;
+      sortOrder: number;
+    }>(
+      `
+        SELECT
+          c.slug AS "courseSlug",
+          c.title AS "courseTitle",
+          c.level AS "courseLevel",
+          cv."versionNumber" AS "versionNumber",
+          cm.id AS "moduleId",
+          cm.title AS "moduleTitle",
+          cm.description AS "moduleDescription",
+          cm."sortOrder" AS "sortOrder"
+        FROM "Course" c
+        JOIN "CourseVersion" cv
+          ON cv."courseId" = c.id
+        JOIN "CourseModule" cm
+          ON cm."courseVersionId" = cv.id
+        WHERE c.slug = $1
+          AND cv.status = 'PUBLISHED'
+        ORDER BY cm."sortOrder" ASC
+      `,
+      [slug]
+    );
+  } catch (error) {
+    console.warn(
+      `[newtoncentre-course-catalog] failed to load published course modules for ${slug}:`,
+      error instanceof Error ? error.message : error
+    );
+    return {
+      course: null,
+      modules: [],
+      source: "UNAVAILABLE",
+    };
+  }
 
   const rows = result.rows.map((row) => ({
     ...row,

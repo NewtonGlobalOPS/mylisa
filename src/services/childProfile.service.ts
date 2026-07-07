@@ -7,6 +7,8 @@ import {
 } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import { loadPublishedCourseModules } from "./newtoncentreCourseCatalog.service.js";
+import { getNdscreenChildScreening } from "./ndscreenDirect.service.js";
+import { listActiveWrapperVectors } from "./wrapperVector.service.js";
 
 type AssessmentStrandSummary = {
   strand: string;
@@ -19,8 +21,22 @@ type AssessmentStrandSummary = {
   currentTargetYear: number | null;
 };
 
+type AssessmentNarrativeSummary = {
+  displayBandLabel: string;
+  displayBandSummary: string;
+  parentNarrative: string;
+  tutorNarrative: string;
+  whatThisMeans: string;
+  strengths: string[];
+  focusAreas: string[];
+  nextSteps: string[];
+  tutorActions: string[];
+  confidenceNote: string;
+};
+
 type CombinedChildProfileParams = {
   studentId: string;
+  subject?: Subject;
   assessmentSessionId?: string;
   ndscreenSessionId?: string;
 };
@@ -89,6 +105,7 @@ type ScreeningSummary = {
 type PriorityStrandRecommendation = AssessmentStrandSummary & {
   priority: number;
   reason: string;
+  evidenceLabel: string;
 };
 
 type RecommendedObjectiveSignal = {
@@ -118,6 +135,59 @@ type InterventionRecommendation = {
   targetYear: number | null;
 };
 
+type LearningReportObjective = {
+  objectiveId: string;
+  code: string;
+  title: string;
+  yearGroup: number | null;
+  strand: string;
+  sequence: number | null;
+  priorityWeight: number;
+  reason: string;
+  source: string;
+  status: string;
+};
+
+type LearningReportLesson = {
+  lessonSessionId: string;
+  coursePlanId: string | null;
+  title: string;
+  status: string;
+  objective: {
+    id: string;
+    code: string;
+    title: string;
+    yearGroup: number | null;
+    strand: string;
+  };
+  startedAt: string | null;
+  endedAt: string | null;
+  updatedAt: string;
+  currentBlockKey: string | null;
+  questionsAnswered: number;
+  questionsCorrect: number;
+  accuracy: number | null;
+  lastActiveAt: string | null;
+  progressLabel: string;
+  recentEvents: Array<{
+    type: string;
+    blockKey: string | null;
+    createdAt: string;
+  }>;
+};
+
+type LearningReportCourse = {
+  coursePlanId: string | null;
+  title: string;
+  status: string;
+  subject: Subject;
+  assessmentSessionId: string | null;
+  ndscreenSessionId: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  source: "SAVED_COURSE_PLAN" | "ASSESSMENT_RECOMMENDATION";
+};
+
 function normalizeText(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
 }
@@ -126,6 +196,17 @@ function schoolYearFromAge(age: number | null | undefined): number | null {
   if (typeof age !== "number" || !Number.isFinite(age)) return null;
   const year = age - 4;
   return year >= 1 && year <= 13 ? year : null;
+}
+
+function resolvePersistedSchoolYear(
+  schoolYear: number | null | undefined,
+  age: number | null | undefined
+): number | null {
+  if (typeof schoolYear === "number" && Number.isFinite(schoolYear)) {
+    return schoolYear >= 1 && schoolYear <= 13 ? schoolYear : null;
+  }
+
+  return schoolYearFromAge(age);
 }
 
 function parseSchoolYearValue(value: string | null | undefined): number | null {
@@ -228,9 +309,11 @@ function mapStrandsFromAttemptNotes(notes: Prisma.JsonValue | null): {
   overallConfidence: number | null;
   questionCount: number;
   strands: AssessmentStrandSummary[];
+  report: AssessmentNarrativeSummary | null;
 } {
   const raw = notes && typeof notes === "object" ? (notes as Record<string, any>) : null;
   const session = raw?.session && typeof raw.session === "object" ? raw.session : null;
+  const report = raw?.report && typeof raw.report === "object" ? raw.report : null;
   const strandRecord =
     session?.strands && typeof session.strands === "object" ? session.strands : {};
   const strandValues = Object.values(strandRecord as Record<string, any>);
@@ -254,6 +337,9 @@ function mapStrandsFromAttemptNotes(notes: Prisma.JsonValue | null): {
         ? Number(value.currentTargetYear)
         : null,
   }));
+  const reportableStrands = strands.some((strand) => strand.asked > 0)
+    ? strands.filter((strand) => strand.asked > 0)
+    : strands;
 
   return {
     entryYear: typeof session?.entryYear === "number" ? Number(session.entryYear) : null,
@@ -266,7 +352,31 @@ function mapStrandsFromAttemptNotes(notes: Prisma.JsonValue | null): {
         ? Number(session.overallConfidence)
         : null,
     questionCount: Array.isArray(session?.responses) ? session.responses.length : 0,
-    strands: strands.sort((a, b) => a.accuracy - b.accuracy || a.confidence - b.confidence),
+    strands: reportableStrands.sort(
+      (a, b) => a.accuracy - b.accuracy || a.confidence - b.confidence
+    ),
+    report: report
+      ? {
+          displayBandLabel: String(report.displayBandLabel ?? ""),
+          displayBandSummary: String(report.displayBandSummary ?? ""),
+          parentNarrative: String(report.parentNarrative ?? ""),
+          tutorNarrative: String(report.tutorNarrative ?? ""),
+          whatThisMeans: String(report.whatThisMeans ?? ""),
+          strengths: Array.isArray(report.strengths)
+            ? report.strengths.map((item: unknown) => String(item)).filter(Boolean)
+            : [],
+          focusAreas: Array.isArray(report.focusAreas)
+            ? report.focusAreas.map((item: unknown) => String(item)).filter(Boolean)
+            : [],
+          nextSteps: Array.isArray(report.nextSteps)
+            ? report.nextSteps.map((item: unknown) => String(item)).filter(Boolean)
+            : [],
+          tutorActions: Array.isArray(report.tutorActions)
+            ? report.tutorActions.map((item: unknown) => String(item)).filter(Boolean)
+            : [],
+          confidenceNote: String(report.confidenceNote ?? ""),
+        }
+      : null,
   };
 }
 
@@ -376,7 +486,259 @@ function buildInterventions(params: {
   return out.slice(0, 4);
 }
 
+function progressLabel(input: {
+  status: string;
+  questionsAnswered: number;
+  questionsCorrect: number;
+  endedAt: Date | null;
+}) {
+  if (input.endedAt || input.status === "COMPLETED") {
+    return input.questionsAnswered > 0
+      ? `Completed with ${input.questionsCorrect}/${input.questionsAnswered} correct.`
+      : "Completed; no question responses were recorded.";
+  }
+
+  if (input.questionsAnswered > 0) {
+    return `In progress with ${input.questionsCorrect}/${input.questionsAnswered} correct so far.`;
+  }
+
+  if (input.status === "LIVE" || input.status === "ACTIVE") {
+    return "Live lesson started; no question responses recorded yet.";
+  }
+
+  return "Lesson planned; progress will appear once the learner starts.";
+}
+
+async function buildLearningReport(params: {
+  studentId: string;
+  subject: Subject;
+  assessmentSessionId?: string;
+  ndscreenSessionId?: string;
+  courseRecommendation: Awaited<ReturnType<typeof buildCourseRecommendation>>;
+  recommendedObjectives: RecommendedObjectiveSignal[];
+}) {
+  const coursePlan = await prisma.coursePlan.findFirst({
+    where: {
+      studentId: params.studentId,
+      subject: params.subject,
+      ...(params.assessmentSessionId
+        ? { assessmentSessionId: params.assessmentSessionId }
+        : {}),
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    include: {
+      items: {
+        orderBy: { sequence: "asc" },
+        include: {
+          objective: {
+            select: {
+              id: true,
+              code: true,
+              title: true,
+              yearGroup: true,
+              strand: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  const course: LearningReportCourse = coursePlan
+    ? {
+        coursePlanId: coursePlan.id,
+        title: coursePlan.title,
+        status: coursePlan.status,
+        subject: coursePlan.subject,
+        assessmentSessionId: coursePlan.assessmentSessionId,
+        ndscreenSessionId: coursePlan.ndscreenSessionId,
+        createdAt: coursePlan.createdAt.toISOString(),
+        updatedAt: coursePlan.updatedAt.toISOString(),
+        source: "SAVED_COURSE_PLAN",
+      }
+    : {
+        coursePlanId: null,
+        title: params.courseRecommendation.label,
+        status: "RECOMMENDED",
+        subject: params.subject,
+        assessmentSessionId: params.assessmentSessionId ?? null,
+        ndscreenSessionId: params.ndscreenSessionId ?? null,
+        createdAt: null,
+        updatedAt: null,
+        source: "ASSESSMENT_RECOMMENDATION",
+      };
+
+  const objectives: LearningReportObjective[] = coursePlan
+    ? coursePlan.items.map((item) => ({
+        objectiveId: item.objectiveId,
+        code: item.objective.code,
+        title: item.objective.title,
+        yearGroup: item.objective.yearGroup,
+        strand: item.objective.strand,
+        sequence: item.sequence,
+        priorityWeight: item.priorityWeight,
+        reason: item.reason,
+        source: "COURSE_PLAN",
+        status: item.status,
+      }))
+    : params.recommendedObjectives.map((objective, index) => ({
+        objectiveId: objective.objectiveId,
+        code: objective.code,
+        title: objective.title,
+        yearGroup: objective.yearGroup,
+        strand: objective.strand,
+        sequence: index + 1,
+        priorityWeight: objective.priorityWeight,
+        reason: objective.reason,
+        source: objective.source,
+        status: "RECOMMENDED",
+      }));
+
+  const lessonWhere: Prisma.LessonSessionWhereInput = {
+    status: { not: "ARCHIVED" },
+    objective: {
+      subject: params.subject,
+    },
+    participants: {
+      some: {
+        studentId: params.studentId,
+      },
+    },
+    ...(coursePlan
+      ? {
+          OR: [
+            { coursePlanId: coursePlan.id },
+            {
+              objectiveId: {
+                in: objectives.map((objective) => objective.objectiveId),
+              },
+            },
+          ],
+        }
+      : {}),
+  };
+
+  const lessons = await prisma.lessonSession.findMany({
+    where: lessonWhere,
+    orderBy: [{ startedAt: "desc" }, { updatedAt: "desc" }],
+    take: 12,
+    select: {
+      id: true,
+      coursePlanId: true,
+      title: true,
+      status: true,
+      startedAt: true,
+      endedAt: true,
+      updatedAt: true,
+      currentBlockKey: true,
+      objective: {
+        select: {
+          id: true,
+          code: true,
+          title: true,
+          yearGroup: true,
+          strand: true,
+        },
+      },
+      participants: {
+        where: {
+          studentId: params.studentId,
+        },
+        take: 1,
+        select: {
+          questionsAnswered: true,
+          questionsCorrect: true,
+          lastActiveAt: true,
+        },
+      },
+      events: {
+        where: {
+          OR: [{ studentId: params.studentId }, { studentId: null }],
+        },
+        orderBy: { createdAt: "desc" },
+        take: 4,
+        select: {
+          type: true,
+          blockKey: true,
+          createdAt: true,
+        },
+      },
+    },
+  });
+
+  const lessonProgress: LearningReportLesson[] = lessons.map((lesson) => {
+    const participant = lesson.participants[0];
+    const questionsAnswered = participant?.questionsAnswered ?? 0;
+    const questionsCorrect = participant?.questionsCorrect ?? 0;
+
+    return {
+      lessonSessionId: lesson.id,
+      coursePlanId: lesson.coursePlanId,
+      title: lesson.title,
+      status: lesson.status,
+      objective: lesson.objective,
+      startedAt: lesson.startedAt ? lesson.startedAt.toISOString() : null,
+      endedAt: lesson.endedAt ? lesson.endedAt.toISOString() : null,
+      updatedAt: lesson.updatedAt.toISOString(),
+      currentBlockKey: lesson.currentBlockKey,
+      questionsAnswered,
+      questionsCorrect,
+      accuracy:
+        questionsAnswered > 0
+          ? Number((questionsCorrect / questionsAnswered).toFixed(3))
+          : null,
+      lastActiveAt: participant?.lastActiveAt
+        ? participant.lastActiveAt.toISOString()
+        : null,
+      progressLabel: progressLabel({
+        status: lesson.status,
+        questionsAnswered,
+        questionsCorrect,
+        endedAt: lesson.endedAt,
+      }),
+      recentEvents: lesson.events.map((event) => ({
+        type: event.type,
+        blockKey: event.blockKey,
+        createdAt: event.createdAt.toISOString(),
+      })),
+    };
+  });
+
+  const completedLessons = lessonProgress.filter(
+    (lesson) => lesson.endedAt || lesson.status === "COMPLETED"
+  ).length;
+  const totalQuestionsAnswered = lessonProgress.reduce(
+    (sum, lesson) => sum + lesson.questionsAnswered,
+    0
+  );
+  const totalQuestionsCorrect = lessonProgress.reduce(
+    (sum, lesson) => sum + lesson.questionsCorrect,
+    0
+  );
+
+  return {
+    course,
+    objectives,
+    lessons: lessonProgress,
+    progressSummary: {
+      plannedObjectiveCount: objectives.length,
+      lessonCount: lessonProgress.length,
+      completedLessonCount: completedLessons,
+      inProgressLessonCount: lessonProgress.filter(
+        (lesson) => lesson.status === "LIVE" || lesson.status === "ACTIVE"
+      ).length,
+      totalQuestionsAnswered,
+      totalQuestionsCorrect,
+      overallLessonAccuracy:
+        totalQuestionsAnswered > 0
+          ? Number((totalQuestionsCorrect / totalQuestionsAnswered).toFixed(3))
+          : null,
+    },
+  };
+}
+
 async function buildCourseRecommendation(params: {
+  subject: Subject;
   studentSchoolYear: number | null;
   entryYear: number | null;
   overallWorkingBand: string | null;
@@ -417,12 +779,13 @@ async function buildCourseRecommendation(params: {
   const hasFoundationIntervention = interventions.some(
     (item) => item.severity === "FOUNDATION"
   );
+  const subjectLabel = params.subject === Subject.SCIENCE ? "science" : "maths";
   const blendedLabel =
     blendedYears.length >= 2
-      ? `Blended Year ${blendedYears[0].year} / Year ${blendedYears[1].year} maths course`
+      ? `Blended Year ${blendedYears[0].year} / Year ${blendedYears[1].year} ${subjectLabel} course`
       : dominantYear != null
-      ? `Year ${dominantYear} maths course`
-      : "Assessment-led maths course";
+      ? `Year ${dominantYear} ${subjectLabel} course`
+      : `Assessment-led ${subjectLabel} course`;
 
   let label = blendedLabel;
   let intensity = "ADAPTIVE";
@@ -461,7 +824,7 @@ async function buildCourseRecommendation(params: {
   }
 
   const courseCatalog = await loadPublishedCourseModules({
-    subject: Subject.MATHS,
+    subject: params.subject,
     schoolYear: dominantYear ?? targetYear,
   });
 
@@ -476,7 +839,7 @@ async function buildCourseRecommendation(params: {
   const moduleObjectives = moduleObjectiveCodes.length
     ? await prisma.curriculumObjective.findMany({
         where: {
-          subject: Subject.MATHS,
+          subject: params.subject,
           code: { in: moduleObjectiveCodes },
         },
         select: {
@@ -600,12 +963,7 @@ async function fetchNdscreenSummary(
   const sessionId = String(ndscreenSessionId ?? "").trim();
   if (!sessionId) return null;
 
-  const baseUrl = String(
-    process.env.NDSCREEN_API_BASE_URL ?? "http://127.0.0.1:4020"
-  ).trim();
-  const token = String(process.env.NDSCREEN_EXPORT_TOKEN ?? "").trim();
-
-  if (!baseUrl || !token) {
+  if (!String(process.env.NDSCREEN_EXPORT_TOKEN ?? "").trim()) {
     return {
       configured: false,
       sessionId,
@@ -624,36 +982,7 @@ async function fetchNdscreenSummary(
   }
 
   try {
-    const res = await fetch(
-      `${baseUrl.replace(/\/+$/, "")}/api/integrations/newtoncentre/sessions/${encodeURIComponent(
-        sessionId
-      )}/status`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
-
-    const data = await res.json().catch(() => null);
-
-    if (!res.ok) {
-      return {
-        configured: true,
-        sessionId,
-        ok: false,
-        status: null,
-        screeningKind: null,
-        questionSet: null,
-        subject: null,
-        intake: null,
-        participants: [],
-        report: null,
-        latestResult: null,
-        learningProfile: null,
-        error: data?.error ?? `ndscreen lookup failed (${res.status})`,
-      };
-    }
+    const data = await getNdscreenChildScreening(sessionId);
 
     return {
       configured: true,
@@ -668,72 +997,59 @@ async function fetchNdscreenSummary(
               typeof data.questionSet.version === "number"
                 ? data.questionSet.version
                 : null,
-          }
+        }
         : null,
-      subject: data?.subject
+      subject: data?.child
         ? {
-            label: typeof data.subject.label === "string" ? data.subject.label : null,
+            label: typeof data.child.displayName === "string" ? data.child.displayName : null,
             displayName:
-              typeof data.subject.displayName === "string"
-                ? data.subject.displayName
+              typeof data.child.displayName === "string"
+                ? data.child.displayName
                 : null,
             ageYears:
-              typeof data.subject.ageYears === "number" ? data.subject.ageYears : null,
+              typeof data.child.ageYears === "number" ? data.child.ageYears : null,
             schoolYear:
-              typeof data.subject.schoolYear === "string"
-                ? data.subject.schoolYear
+              typeof data.child.schoolYear === "string"
+                ? data.child.schoolYear
                 : null,
-            locale: typeof data.subject.locale === "string" ? data.subject.locale : null,
-            dob: typeof data.subject.dob === "string" ? data.subject.dob : null,
+            locale: typeof data.child.locale === "string" ? data.child.locale : null,
+            dob: typeof data.child.dob === "string" ? data.child.dob : null,
           }
         : null,
-      intake: data?.intake
+      intake: data?.child || data?.guardian
         ? {
-            id: String(data.intake.id),
+            id: sessionId,
             schoolName:
-              typeof data.intake.schoolName === "string"
-                ? data.intake.schoolName
+              typeof data.child?.schoolName === "string"
+                ? data.child.schoolName
                 : null,
-            primaryGuardian: data.intake.primaryGuardian
+            primaryGuardian: data.guardian
               ? {
                   relationship:
-                    typeof data.intake.primaryGuardian.relationship === "string"
-                      ? data.intake.primaryGuardian.relationship
+                    typeof data.guardian.relationship === "string"
+                      ? data.guardian.relationship
                       : null,
                   firstName:
-                    typeof data.intake.primaryGuardian.firstName === "string"
-                      ? data.intake.primaryGuardian.firstName
+                    typeof data.guardian.firstName === "string"
+                      ? data.guardian.firstName
                       : null,
                   lastName:
-                    typeof data.intake.primaryGuardian.lastName === "string"
-                      ? data.intake.primaryGuardian.lastName
+                    typeof data.guardian.lastName === "string"
+                      ? data.guardian.lastName
                       : null,
                   email:
-                    typeof data.intake.primaryGuardian.email === "string"
-                      ? data.intake.primaryGuardian.email
+                    typeof data.guardian.email === "string"
+                      ? data.guardian.email
                       : null,
                   phone:
-                    typeof data.intake.primaryGuardian.phone === "string"
-                      ? data.intake.primaryGuardian.phone
+                    typeof data.guardian.phone === "string"
+                      ? data.guardian.phone
                       : null,
                 }
               : null,
           }
         : null,
-      participants: Array.isArray(data?.participants)
-        ? data.participants.map((participant: any) => ({
-            informant: String(participant?.informant ?? ""),
-            label: String(participant?.label ?? participant?.informant ?? ""),
-            required: Boolean(participant?.required),
-            state: String(participant?.state ?? "UNKNOWN"),
-            startedAt:
-              typeof participant?.startedAt === "string" ? participant.startedAt : null,
-            completedAt:
-              typeof participant?.completedAt === "string"
-                ? participant.completedAt
-                : null,
-          }))
-        : [],
+      participants: [],
       report: data?.report
         ? {
             status: typeof data.report.status === "string" ? data.report.status : null,
@@ -835,6 +1151,7 @@ async function fetchNdscreenSummary(
 export async function buildCombinedChildProfile(
   params: CombinedChildProfileParams
 ) {
+  const requestedSubject = params.subject ?? Subject.MATHS;
   const student = await prisma.student.findUnique({
     where: { id: params.studentId },
     select: {
@@ -842,16 +1159,43 @@ export async function buildCombinedChildProfile(
       firstName: true,
       lastName: true,
       age: true,
+      schoolYear: true,
       keyStage: true,
       subjects: true,
       guardianEmail: true,
       integrationLinks: {
-        where: { source: IntegrationSource.NEWTONCENTRE },
+        where: {
+          ndscreenSessionId: {
+            not: null,
+          },
+          source: {
+            in: [IntegrationSource.NEWTONCENTRE, IntegrationSource.NDSCREEN],
+          },
+        },
         orderBy: [{ updatedAt: "desc" }],
         take: 1,
         select: {
           externalId: true,
           ndscreenSessionId: true,
+        },
+      },
+      attempts: {
+        where: {
+          taskType: TaskType.ASSESSMENT,
+          subject: {
+            in: [Subject.MATHS, Subject.SCIENCE],
+          },
+        },
+        orderBy: [{ submittedAt: "desc" }, { updatedAt: "desc" }],
+        take: 10,
+        select: {
+          id: true,
+          subject: true,
+          status: true,
+          score: true,
+          createdAt: true,
+          updatedAt: true,
+          submittedAt: true,
         },
       },
     },
@@ -861,8 +1205,31 @@ export async function buildCombinedChildProfile(
     throw new Error("Student not found");
   }
 
+  const availableAssessments = [Subject.MATHS, Subject.SCIENCE]
+    .map((assessmentSubject) => {
+      const subjectAttempts = student.attempts.filter(
+        (item) => item.subject === assessmentSubject
+      );
+      const attempt =
+        subjectAttempts.find((item) => item.status === AttemptStatus.SUBMITTED) ??
+        subjectAttempts[0];
+      return attempt
+        ? {
+            id: attempt.id,
+            subject: attempt.subject,
+            status: attempt.status,
+            score: attempt.score,
+            createdAt: attempt.createdAt.toISOString(),
+            updatedAt: attempt.updatedAt.toISOString(),
+            submittedAt: attempt.submittedAt?.toISOString() ?? null,
+          }
+        : null;
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
   const assessmentAttemptSelect = {
     id: true,
+    subject: true,
     status: true,
     score: true,
     createdAt: true,
@@ -888,35 +1255,41 @@ export async function buildCombinedChildProfile(
     },
   } satisfies Prisma.AttemptSelect;
 
-  const assessmentAttempt = params.assessmentSessionId
+  const requestedAssessmentAttempt = params.assessmentSessionId
     ? await prisma.attempt.findFirst({
         where: {
           id: params.assessmentSessionId,
           studentId: student.id,
-          subject: Subject.MATHS,
           taskType: TaskType.ASSESSMENT,
+          subject: requestedSubject,
+          status: AttemptStatus.SUBMITTED,
         },
         select: assessmentAttemptSelect,
       })
-    : await prisma.attempt.findFirst({
+    : null;
+
+  const assessmentAttempt = requestedAssessmentAttempt ??
+    (await prisma.attempt.findFirst({
         where: {
           studentId: student.id,
-          subject: Subject.MATHS,
+          subject: requestedSubject,
           taskType: TaskType.ASSESSMENT,
           status: AttemptStatus.SUBMITTED,
         },
         orderBy: [{ submittedAt: "desc" }, { updatedAt: "desc" }],
         select: assessmentAttemptSelect,
-      }) ??
+      })) ??
       (await prisma.attempt.findFirst({
         where: {
           studentId: student.id,
-          subject: Subject.MATHS,
+          subject: requestedSubject,
           taskType: TaskType.ASSESSMENT,
         },
         orderBy: [{ updatedAt: "desc" }],
         select: assessmentAttemptSelect,
       }));
+
+  const subject = assessmentAttempt?.subject ?? requestedSubject;
 
   const assessmentSummary = assessmentAttempt
     ? mapStrandsFromAttemptNotes(assessmentAttempt.notes)
@@ -926,6 +1299,7 @@ export async function buildCombinedChildProfile(
         overallConfidence: null,
         questionCount: 0,
         strands: [],
+        report: null,
       };
 
   const linkedNdscreenSessionId =
@@ -934,13 +1308,14 @@ export async function buildCombinedChildProfile(
     undefined;
 
   const screening = await fetchNdscreenSummary(linkedNdscreenSessionId);
+  const wrapperVectors = await listActiveWrapperVectors(student.id);
 
   const studentSchoolYear =
     screening?.subject?.schoolYear != null
       ? parseSchoolYearValue(screening.subject.schoolYear)
       : assessmentSummary.entryYear != null
       ? assessmentSummary.entryYear + 1
-      : schoolYearFromAge(student.age);
+      : resolvePersistedSchoolYear(student.schoolYear, student.age);
 
   const priorityStrands = assessmentSummary.strands
     .filter((strand) => strand.asked > 0)
@@ -958,8 +1333,14 @@ export async function buildCombinedChildProfile(
     .map((strand, index) => ({
       ...strand,
       priority: index + 1,
+      evidenceLabel:
+        strand.asked < 3
+          ? `${strand.correct}/${strand.asked} correct`
+          : `${Math.round(strand.accuracy * 100)}% accuracy`,
       reason:
-        strand.secureYear == null
+        strand.asked < 3
+          ? "This strand has only light evidence so far and should be rechecked before treating it as a secure gap."
+          : strand.secureYear == null
           ? "This strand still needs secure baseline evidence."
           : strand.emergingYear == null
           ? "This strand is secure at the current level but needs the next layer building."
@@ -999,7 +1380,7 @@ export async function buildCombinedChildProfile(
     where: {
       studentId: student.id,
       objective: {
-        subject: Subject.MATHS,
+        subject,
       },
     },
     orderBy: [{ masteryScore: "asc" }, { updatedAt: "desc" }],
@@ -1036,8 +1417,8 @@ export async function buildCombinedChildProfile(
       strand: item.strand,
       reason:
         item.count > 1
-          ? `Missed ${item.count} times in the latest maths assessment.`
-          : "Missed in the latest maths assessment.",
+          ? `Missed ${item.count} times in the latest ${subject.toLowerCase()} assessment.`
+          : `Missed in the latest ${subject.toLowerCase()} assessment.`,
       source: "ASSESSMENT_ATTEMPT",
       priorityWeight: 5,
       gapSeverity: Math.min(3, item.count),
@@ -1073,7 +1454,7 @@ export async function buildCombinedChildProfile(
 
     const fallbackObjectives = await prisma.curriculumObjective.findMany({
       where: {
-        subject: Subject.MATHS,
+        subject,
         isActive: true,
         ...(targetYears.length > 0
           ? {
@@ -1124,12 +1505,40 @@ export async function buildCombinedChildProfile(
   }
 
   const courseRecommendation = await buildCourseRecommendation({
+    subject,
     studentSchoolYear,
     entryYear: assessmentSummary.entryYear,
     overallWorkingBand: assessmentSummary.overallWorkingBand,
     screening,
     priorityStrands,
     recommendedObjectives,
+  });
+  const learningReport = await buildLearningReport({
+    studentId: student.id,
+    subject,
+    assessmentSessionId: assessmentAttempt?.id ?? params.assessmentSessionId,
+    ndscreenSessionId: linkedNdscreenSessionId,
+    courseRecommendation,
+    recommendedObjectives,
+  });
+  const latestStoredReport = await prisma.storedReport.findFirst({
+    where: {
+      studentId: student.id,
+      subject,
+      ...(assessmentAttempt?.id ? { attemptId: assessmentAttempt.id } : {}),
+    },
+    orderBy: {
+      generatedAt: "desc",
+    },
+    select: {
+      id: true,
+      title: true,
+      filename: true,
+      mimeType: true,
+      sizeBytes: true,
+      generatedAt: true,
+      publicToken: true,
+    },
   });
 
   return {
@@ -1150,6 +1559,7 @@ export async function buildCombinedChildProfile(
     assessment: assessmentAttempt
       ? {
           sessionId: assessmentAttempt.id,
+          subject,
           status: assessmentAttempt.status,
           score: assessmentAttempt.score,
           createdAt: assessmentAttempt.createdAt.toISOString(),
@@ -1162,9 +1572,25 @@ export async function buildCombinedChildProfile(
           overallConfidence: assessmentSummary.overallConfidence,
           questionCount: assessmentSummary.questionCount,
           strands: assessmentSummary.strands,
+          report: assessmentSummary.report,
         }
       : null,
     screening,
+    storedReport: latestStoredReport
+      ? {
+          id: latestStoredReport.id,
+          title: latestStoredReport.title,
+          filename: latestStoredReport.filename,
+          mimeType: latestStoredReport.mimeType,
+          sizeBytes: Number(latestStoredReport.sizeBytes),
+          generatedAt: latestStoredReport.generatedAt.toISOString(),
+          downloadUrl: `/api/reports/${latestStoredReport.id}/pdf`,
+          parentViewUrl: `/public/reports/${latestStoredReport.publicToken}/pdf`,
+        }
+      : null,
+    wrapperVectors,
+    learningReport,
+    availableAssessments,
     recommendations: {
       course: courseRecommendation,
       deliveryProfile: {
@@ -1180,13 +1606,19 @@ export async function buildCombinedChildProfile(
             : "MEDIUM",
         confidencePriority:
           screening?.learningProfile?.summary ||
-          screening?.latestResult?.recommendation
+          screening?.latestResult?.recommendation ||
+          wrapperVectors.length > 0
             ? "HIGH"
             : "MEDIUM",
         rationale:
           screening?.learningProfile?.recommendation ??
           screening?.latestResult?.recommendation ??
-          "Use the assessment evidence to keep the course adaptive and strand-led.",
+          (wrapperVectors.length > 0
+            ? `Wrapper vectors are available (${wrapperVectors
+                .slice(0, 2)
+                .map((item) => item.title)
+                .join(", ")}), so the lesson should adapt delivery explicitly around them.`
+            : "Use the assessment evidence to keep the course adaptive and strand-led."),
       },
       strands: priorityStrands,
       objectives: recommendedObjectives,

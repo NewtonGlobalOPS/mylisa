@@ -8,6 +8,7 @@ export function loadState(): StoredAssessmentState {
     if (!raw) {
       return {
         student: null,
+        subject: "MATHS",
         sessionId: "",
         entryYear: null,
         currentQuestion: null,
@@ -21,6 +22,7 @@ export function loadState(): StoredAssessmentState {
   } catch {
     return {
       student: null,
+      subject: "MATHS",
       sessionId: "",
       entryYear: null,
       currentQuestion: null,
@@ -42,7 +44,16 @@ export function clearState() {
 
 export function saveStudent(student: StudentOnboardingResponse) {
   const state = loadState();
-  saveState({ ...state, student });
+  saveState({
+    ...state,
+    student,
+    subject: student.student.subjects.includes("SCIENCE") && !student.student.subjects.includes("MATHS") ? "SCIENCE" : "MATHS",
+    sessionId: "",
+    entryYear: null,
+    currentQuestion: null,
+    result: null,
+    askedCount: 0,
+  });
 }
 
 export function saveStudentFromLookup(input: {
@@ -76,6 +87,12 @@ export function saveStudentFromLookup(input: {
         guardianEmail: input.guardianEmail ?? undefined,
       },
     },
+    subject: input.subjects.includes("SCIENCE") && !input.subjects.includes("MATHS") ? "SCIENCE" : "MATHS",
+    sessionId: "",
+    entryYear: null,
+    currentQuestion: null,
+    result: null,
+    askedCount: 0,
   });
 }
 
@@ -87,6 +104,11 @@ export function saveNdscreenSessionId(ndscreenSessionId: string) {
 export function saveAuthToken(authToken: string) {
   const state = loadState();
   saveState({ ...state, authToken });
+}
+
+export function clearAuthToken() {
+  const state = loadState();
+  saveState({ ...state, authToken: "" });
 }
 
 export function getAuthToken(): string {

@@ -5,11 +5,30 @@
 
   .app-shell {
     padding: 0;
+    display: block;
+    min-height: auto;
+    background: white;
   }
 
+  .app-sidebar,
+  .app-topbar,
   .hero-card,
   .no-print {
     display: none !important;
+  }
+
+  .app-content > :not(.print-surface) {
+    display: none !important;
+  }
+
+  .app-main,
+  .app-content {
+    max-width: none;
+    padding: 0;
+  }
+
+  .print-surface {
+    display: block !important;
   }
 
   .report-page {
@@ -17,14 +36,72 @@
     box-shadow: none;
     border-radius: 0;
     padding: 0;
+    font-size: 10.5pt;
+    line-height: 1.32;
+    color: #111;
+  }
+
+  .report-header {
+    grid-template-columns: 1fr 58mm;
+    gap: 8mm;
+    padding-bottom: 5mm;
+    margin-bottom: 5mm;
+  }
+
+  .report-title {
+    font-size: 20pt;
+  }
+
+  .report-meta {
+    font-size: 8.5pt;
+    padding: 3mm;
+  }
+
+  .report-section {
+    break-inside: avoid;
+    margin-bottom: 5mm;
+  }
+
+  .report-section h2 {
+    font-size: 10pt;
+    margin-bottom: 2mm;
+  }
+
+  .report-section p {
+    font-size: 9.2pt;
+    margin-bottom: 2mm;
+  }
+
+  .report-grid {
+    grid-template-columns: 1fr;
+    gap: 2.4mm;
   }
 
   .report-card {
     break-inside: avoid;
+    padding: 2.5mm 3mm;
+    border-radius: 0;
+  }
+
+  .report-card h3 {
+    font-size: 9.4pt;
+    margin-bottom: 1mm;
+  }
+
+  .report-objective-number {
+    font-size: 7.8pt;
+  }
+
+  .report-code {
+    font-size: 6.8pt !important;
+  }
+
+  .kicker {
+    font-size: 8pt;
   }
 
   @page {
     size: A4;
-    margin: 16mm;
+    margin: 12mm;
   }
 }

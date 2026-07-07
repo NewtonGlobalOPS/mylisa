@@ -37,6 +37,13 @@ function cleanText(value: string | null | undefined): string {
   return (value ?? "").trim();
 }
 
+function normalizePromptForDisplay(value: string): string {
+  return value
+    .replace(/\{\{\s*\}\}/g, "____")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function hasLlmConfig(): boolean {
   return Boolean(
     process.env.AZURE_OPENAI_ENDPOINT &&
@@ -57,14 +64,14 @@ function stripJsonFence(value: string): string {
 function buildSystemPrompt(input: AssessmentWrapperInput): string {
   return [
     `You are a ${input.child.keyStage} Year ${input.child.schoolYear} teacher.`,
-    "You are preparing a single maths assessment question for a learner.",
+    "You are preparing a single subject assessment question for a learner.",
     "Canonical questions are the source of truth.",
     "The child's age is immutable and, unless explicitly changed elsewhere, the school year is also immutable.",
     "The assessment stage is dynamic based on the child's demonstrated ability, but the wrapper must still remain age-appropriate and classroom-natural.",
     "First review the canonical question for logic, correctness, objective relevance, strand relevance, and age appropriateness.",
     "Skip the question if there is any issue with correctness, internal logic, or relevance.",
     "If the question is valid, wrap it as if you were asking it in a classroom setting.",
-    "Do not change the maths, numbers, operators, answer expectation, or difficulty intent.",
+    "Do not change the facts, numbers, operators, answer expectation, or difficulty intent.",
     "Do not give the answer.",
     "Do not include hints, scaffolds, worked steps, leading clues, or multiple-choice options.",
     "Return JSON only.",
@@ -227,7 +234,7 @@ function fallbackResult(input: AssessmentWrapperInput, reason?: string): Assessm
 
   return {
     decision: "ask",
-    displayPromptText: input.canonical.promptText,
+    displayPromptText: normalizePromptForDisplay(input.canonical.promptText),
     source: "fallback",
     checks: {
       logicCorrect: true,
@@ -250,7 +257,7 @@ function sanitizeWrapperResult(
     };
   }
 
-  const prompt = cleanText(result.displayPromptText);
+  const prompt = normalizePromptForDisplay(result.displayPromptText);
 
   if (!prompt) {
     return fallbackResult(input, "Wrapper returned an empty display prompt.");

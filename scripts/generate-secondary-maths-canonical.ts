@@ -24,7 +24,7 @@ async function main() {
     where: {
       organisationId: organisation.id,
       subject: Subject.MATHS,
-      yearGroup: { in: [7, 8, 9, 10] },
+      yearGroup: { in: [7, 8, 9, 10, 11] },
       isActive: true,
     },
     select: {
@@ -42,7 +42,7 @@ async function main() {
     orderBy: [{ yearGroup: "asc" }, { code: "asc" }],
   });
 
-  console.log(`Found ${objectives.length} Year 7–10 maths objectives.`);
+  console.log(`Found ${objectives.length} Year 7–11 maths objectives.`);
 
   let created = 0;
   let replaced = 0;

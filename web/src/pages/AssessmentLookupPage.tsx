@@ -4,8 +4,16 @@ import Layout from "../components/Layout";
 import { searchDashboardLearners, startAssessment } from "../api/assessmentApi";
 import type { DashboardLearnerLookupResponse } from "../types/assessment";
 import { loadState, saveNdscreenSessionId, saveState, saveStudentFromLookup } from "../utils/storage";
+import { normaliseAssessmentYear } from "../utils/schoolYear";
 
 type LearnerRow = DashboardLearnerLookupResponse["items"][number];
+type AssessmentSubject = "MATHS" | "SCIENCE";
+
+const ASSESSMENT_SUBJECTS: AssessmentSubject[] = ["MATHS", "SCIENCE"];
+
+function defaultAssessmentSubject(subjects: string[]): AssessmentSubject {
+  return subjects.includes("SCIENCE") && !subjects.includes("MATHS") ? "SCIENCE" : "MATHS";
+}
 
 export default function AssessmentLookupPage() {
   const navigate = useNavigate();
@@ -52,7 +60,7 @@ export default function AssessmentLookupPage() {
     saveNdscreenSessionId(row.ndscreenSessionId ?? "");
   }
 
-  async function startFreshAssessment(row: LearnerRow) {
+  async function startFreshAssessment(row: LearnerRow, subject = defaultAssessmentSubject(row.subjects)) {
     loadLearner(row);
     setStartingId(row.studentId);
     setError("");
@@ -60,11 +68,13 @@ export default function AssessmentLookupPage() {
     try {
       const started = await startAssessment({
         studentId: row.studentId,
-        childCurrentYear: row.schoolYear ?? Math.max(1, Math.min(13, row.age - 4)),
+        childCurrentYear: normaliseAssessmentYear(row.schoolYear, row.age),
+        subject,
       });
 
       saveState({
         ...loadState(),
+        subject: started.subject,
         sessionId: started.sessionId,
         entryYear: started.entryYear,
         currentQuestion: started.firstQuestion,
@@ -84,6 +94,7 @@ export default function AssessmentLookupPage() {
     loadLearner(row);
     saveState({
       ...loadState(),
+      subject: row.latestAssessment?.subject ?? defaultAssessmentSubject(row.subjects),
       sessionId: row.latestAssessment?.id ?? "",
       currentQuestion: null,
       result: null,
@@ -131,7 +142,8 @@ export default function AssessmentLookupPage() {
           </p>
         ) : null}
         <div className="profile-stack">
-          {results.map((row) => (
+          {results.map((row) => {
+            return (
             <div key={row.studentId} className="profile-item">
               <div className="profile-item-head">
                 <strong>{row.displayName}</strong>
@@ -152,18 +164,23 @@ export default function AssessmentLookupPage() {
                 <div>
                   <strong>Latest assessment:</strong>{" "}
                   {row.latestAssessment
-                    ? `${row.latestAssessment.status} · ${new Date(row.latestAssessment.updatedAt).toLocaleString()}`
+                    ? `${row.latestAssessment.subject === "SCIENCE" ? "Science" : "Maths"} · ${row.latestAssessment.status} · ${new Date(row.latestAssessment.updatedAt).toLocaleString()}`
                     : "No assessment yet"}
                 </div>
               </div>
               <div className="dashboard-actions" style={{ marginTop: 14 }}>
-                <button
-                  className="btn btn-primary"
-                  disabled={startingId === row.studentId}
-                  onClick={() => void startFreshAssessment(row)}
-                >
-                  {startingId === row.studentId ? "Starting..." : "Start new assessment"}
-                </button>
+                {ASSESSMENT_SUBJECTS.map((subject) => (
+                  <button
+                    key={subject}
+                    className={subject === "SCIENCE" ? "btn btn-primary" : "btn btn-secondary"}
+                    disabled={startingId === row.studentId}
+                    onClick={() => void startFreshAssessment(row, subject)}
+                  >
+                    {startingId === row.studentId
+                      ? "Starting..."
+                      : `Start ${subject === "MATHS" ? "Maths" : "Science"} assessment`}
+                  </button>
+                ))}
                 <button
                   className="btn btn-secondary"
                   disabled={!row.latestAssessment}
@@ -173,7 +190,8 @@ export default function AssessmentLookupPage() {
                 </button>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </Layout>

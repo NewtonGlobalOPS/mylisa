@@ -27,6 +27,7 @@ export default function OnboardingPage() {
   const [ndscreenSessionId, setNdscreenSessionId] = useState("");
   const [subjects, setSubjects] = useState<SubjectOption[]>([
     "MATHS",
+    "SCIENCE",
     "ENGLISH",
   ]);
   const presentation = getAgePresentation(schoolYear);

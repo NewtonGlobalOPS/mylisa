@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
-import { prisma } from "../lib/prisma";
+import { prisma } from "../lib/prisma.js";
 import { KeyStage, Role, Subject } from "@prisma/client";
+import { importStudentFromNdscreen } from "../services/ndscreenDirect.service.js";
 
 export const onboardingRouter = Router();
 
@@ -15,6 +16,10 @@ const createStudentSchema = z.object({
   schoolYear: z.number().int().min(1).max(13),
   subjects: z.array(z.nativeEnum(Subject)).min(1).default([Subject.MATHS]),
   guardianEmail: z.string().email().optional(),
+});
+
+const importFromNdscreenSchema = z.object({
+  sessionId: z.string().trim().min(1),
 });
 
 async function getDefaultOrganisationId(): Promise<string> {
@@ -90,6 +95,7 @@ onboardingRouter.post("/api/onboarding/student", async (req, res) => {
             firstName: data.firstName,
             lastName: data.lastName,
             age: data.age,
+            schoolYear: data.schoolYear,
             keyStage,
             subjects: data.subjects,
             guardianEmail: data.guardianEmail,
@@ -105,6 +111,7 @@ onboardingRouter.post("/api/onboarding/student", async (req, res) => {
             firstName: true,
             lastName: true,
             age: true,
+            schoolYear: true,
             keyStage: true,
             subjects: true,
             guardianEmail: true,
@@ -121,13 +128,36 @@ onboardingRouter.post("/api/onboarding/student", async (req, res) => {
       temporaryPassword: data.password ? undefined : plainPassword,
       student: {
         ...created.student,
-        schoolYear: data.schoolYear,
       },
     });
   } catch (error) {
     console.error("Failed to create student:", error);
     return res.status(500).json({
       error: "Failed to create student",
+    });
+  }
+});
+
+onboardingRouter.post("/api/onboarding/from-ndscreen", async (req, res) => {
+  const parsed = importFromNdscreenSchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      issues: parsed.error.issues,
+    });
+  }
+
+  try {
+    const result = await importStudentFromNdscreen(parsed.data.sessionId);
+    return res.status(201).json(result);
+  } catch (error) {
+    console.error("Failed to import student from ndscreen:", error);
+    return res.status(500).json({
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to import student from ndscreen",
     });
   }
 });

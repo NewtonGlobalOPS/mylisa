@@ -930,6 +930,40 @@ function buildSolveLinearTwoStepItems(count = 10): DirectGeneratedCanonicalQuest
   return withSequence(takeTargetCount(pool, count));
 }
 
+function buildSolveQuadraticFoundationItems(count = 10): DirectGeneratedCanonicalQuestion[] {
+  const pool = [
+    mathsQuestion({ promptText: "Solve: x² = 49", answerText: "7 or -7", difficulty: DifficultyBand.EASY, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2=49" }),
+    mathsQuestion({ promptText: "Solve: x² = 36", answerText: "6 or -6", difficulty: DifficultyBand.EASY, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2=36" }),
+    mathsQuestion({ promptText: "Solve: x² - 9 = 0", answerText: "3 or -3", difficulty: DifficultyBand.MEDIUM, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2-9=0" }),
+    mathsQuestion({ promptText: "Solve: x² - 16 = 0", answerText: "4 or -4", difficulty: DifficultyBand.MEDIUM, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2-16=0" }),
+    mathsQuestion({ promptText: "Solve: x² + 5x + 6 = 0", answerText: "-2 or -3", difficulty: DifficultyBand.MEDIUM, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2+5x+6=0" }),
+    mathsQuestion({ promptText: "Solve: x² - 5x + 6 = 0", answerText: "2 or 3", difficulty: DifficultyBand.MEDIUM, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2-5x+6=0" }),
+    mathsQuestion({ promptText: "Solve: x² + 7x + 12 = 0", answerText: "-3 or -4", difficulty: DifficultyBand.HARD, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2+7x+12=0" }),
+    mathsQuestion({ promptText: "Solve: x² - x - 12 = 0", answerText: "4 or -3", difficulty: DifficultyBand.HARD, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2-x-12=0" }),
+    mathsQuestion({ promptText: "Solve: x² + x - 20 = 0", answerText: "4 or -5", difficulty: DifficultyBand.HARD, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2+x-20=0" }),
+    mathsQuestion({ promptText: "Solve: x² - 2x - 15 = 0", answerText: "5 or -3", difficulty: DifficultyBand.HARD, domain: "ALGEBRA", subtype: "SOLVE_QUADRATIC_FOUNDATION", equation: "x^2-2x-15=0" }),
+  ];
+
+  return withSequence(takeTargetCount(pool, count));
+}
+
+function buildSolveInequalityFoundationItems(count = 10): DirectGeneratedCanonicalQuestion[] {
+  const pool = [
+    mathsQuestion({ promptText: "Solve: x + 4 > 9", answerText: "x > 5", difficulty: DifficultyBand.EASY, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "x+4>9" }),
+    mathsQuestion({ promptText: "Solve: x - 3 < 7", answerText: "x < 10", difficulty: DifficultyBand.EASY, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "x-3<7" }),
+    mathsQuestion({ promptText: "Solve: 2x > 14", answerText: "x > 7", difficulty: DifficultyBand.MEDIUM, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "2x>14" }),
+    mathsQuestion({ promptText: "Solve: 3x <= 18", answerText: "x <= 6", difficulty: DifficultyBand.MEDIUM, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "3x<=18" }),
+    mathsQuestion({ promptText: "Solve: 5x - 10 >= 20", answerText: "x >= 6", difficulty: DifficultyBand.MEDIUM, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "5x-10>=20" }),
+    mathsQuestion({ promptText: "Solve: 4x + 3 < 19", answerText: "x < 4", difficulty: DifficultyBand.MEDIUM, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "4x+3<19" }),
+    mathsQuestion({ promptText: "Solve: -x > 5", answerText: "x < -5", difficulty: DifficultyBand.HARD, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "-x>5" }),
+    mathsQuestion({ promptText: "Solve: -2x <= 8", answerText: "x >= -4", difficulty: DifficultyBand.HARD, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "-2x<=8" }),
+    mathsQuestion({ promptText: "Solve: 7 - x < 1", answerText: "x > 6", difficulty: DifficultyBand.HARD, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "7-x<1" }),
+    mathsQuestion({ promptText: "Solve: 2 - 3x >= -10", answerText: "x <= 4", difficulty: DifficultyBand.HARD, domain: "ALGEBRA", subtype: "SOLVE_INEQUALITY_FOUNDATION", equation: "2-3x>=-10" }),
+  ];
+
+  return withSequence(takeTargetCount(pool, count));
+}
+
 function buildExpandSingleBracketItems(count = 10): DirectGeneratedCanonicalQuestion[] {
   const pool = [
     mathsQuestion({ promptText: "Expand: 3(x + 4)", answerText: "3x + 12", difficulty: DifficultyBand.EASY, domain: "ALGEBRA", subtype: "EXPAND_SINGLE_BRACKET", equation: "3(x+4)" }),
@@ -1078,6 +1112,23 @@ function buildRatioScaleItems(count = 10): DirectGeneratedCanonicalQuestion[] {
     mathsQuestion({ promptText: "If 4 workers paint 1 wall in 3 hours, how many wall-hours is that?", answerText: "12", difficulty: DifficultyBand.HARD, domain: "RATIO", subtype: "RATIO_SCALE" }),
     mathsQuestion({ promptText: "8 oranges cost £2.40. What do 15 oranges cost?", answerText: "£4.50", difficulty: DifficultyBand.HARD, domain: "RATIO", subtype: "RATIO_SCALE" }),
     mathsQuestion({ promptText: "250ml of paint covers 5m². How much paint for 12m²?", answerText: "600ml", difficulty: DifficultyBand.HARD, domain: "RATIO", subtype: "RATIO_SCALE" }),
+  ];
+
+  return withSequence(takeTargetCount(pool, count));
+}
+
+function buildScaleDrawingsFoundationItems(count = 10): DirectGeneratedCanonicalQuestion[] {
+  const pool = [
+    mathsQuestion({ promptText: "A map uses scale 1cm : 5km. What distance is 4cm?", answerText: "20km", difficulty: DifficultyBand.EASY, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
+    mathsQuestion({ promptText: "A scale drawing uses 1cm : 8m. What real distance is 6cm?", answerText: "48m", difficulty: DifficultyBand.EASY, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
+    mathsQuestion({ promptText: "A map uses scale 1cm : 3km. What distance is 7cm?", answerText: "21km", difficulty: DifficultyBand.EASY, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
+    mathsQuestion({ promptText: "A plan uses scale 1cm : 25cm. A line is 6cm on the plan. What is the real length?", answerText: "150cm", difficulty: DifficultyBand.MEDIUM, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
+    mathsQuestion({ promptText: "A map uses scale 1cm : 4km. What distance is 9cm?", answerText: "36km", difficulty: DifficultyBand.MEDIUM, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
+    mathsQuestion({ promptText: "A scale drawing uses 2cm : 7m. What real distance is 8cm?", answerText: "28m", difficulty: DifficultyBand.MEDIUM, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
+    mathsQuestion({ promptText: "A map uses scale 2cm : 9km. What real distance is 10cm?", answerText: "45km", difficulty: DifficultyBand.MEDIUM, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
+    mathsQuestion({ promptText: "A scale drawing uses 3cm : 12m. What real distance is 15cm?", answerText: "60m", difficulty: DifficultyBand.HARD, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
+    mathsQuestion({ promptText: "A map uses scale 5cm : 20km. What real distance is 17.5cm?", answerText: "70km", difficulty: DifficultyBand.HARD, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
+    mathsQuestion({ promptText: "A floor plan uses scale 2cm : 1m. A wall measures 11cm on the plan. What is the real wall length?", answerText: "5.5m", difficulty: DifficultyBand.HARD, domain: "RATIO", subtype: "SCALE_DRAWINGS_FOUNDATION" }),
   ];
 
   return withSequence(takeTargetCount(pool, count));
@@ -2375,10 +2426,13 @@ function buildYear4SymmetryItems(count = 10): DirectGeneratedCanonicalQuestion[]
     ["rhombus", 2],
   ];
 
+  const articleFor = (shape: string) =>
+    /^(equilateral|isosceles|octagon)\b/i.test(shape) ? "an" : "a";
+
   const items = shapes.map(([shape, lines]) =>
     makeQuestion({
       itemType: "SHAPE_NAME",
-      promptText: `How many lines of symmetry does a ${shape} have?`,
+      promptText: `How many lines of symmetry does ${articleFor(shape)} ${shape} have?`,
       answerText: String(lines),
       difficulty: lines >= 5 ? DifficultyBand.HARD : DifficultyBand.MEDIUM,
       contentJson: {
@@ -2794,6 +2848,10 @@ export function generateDirectCanonicalQuestions(
 
     case "SOLVE_LINEAR_TWO_STEP":
       return buildSolveLinearTwoStepItems(targetCount);
+    case "SOLVE_QUADRATIC_FOUNDATION":
+      return buildSolveQuadraticFoundationItems(targetCount);
+    case "SOLVE_INEQUALITY_FOUNDATION":
+      return buildSolveInequalityFoundationItems(targetCount);
 
     case "EXPAND_SINGLE_BRACKET":
       return buildExpandSingleBracketItems(targetCount);
@@ -2821,6 +2879,8 @@ export function generateDirectCanonicalQuestions(
 
     case "RATIO_SCALE":
       return buildRatioScaleItems(targetCount);
+    case "SCALE_DRAWINGS_FOUNDATION":
+      return buildScaleDrawingsFoundationItems(targetCount);
 
     case "ANGLE_FACTS_FOUNDATION":
       return buildAngleFactsFoundationItems(targetCount);

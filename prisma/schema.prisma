@@ -40,6 +40,11 @@ enum CanonicalItemType {
   DATE_SEQUENCE
   COIN_VALUE
   SHAPE_NAME
+  OAK_MULTIPLE_CHOICE
+  OAK_MULTI_BLANK_CHOICE
+  OAK_SHORT_ANSWER
+  OAK_MATCH
+  OAK_ORDER
 }
 
 enum CanonicalOperator {
@@ -227,11 +232,16 @@ model Organisation {
   wrapperVectors       WrapperVector[]
   coursePlans          CoursePlan[]
   coursePlanItems      CoursePlanItem[]
+  lessonPlans          LessonPlan[]
+  lessonPlanObjectives LessonPlanObjective[]
+  lessonPlanSections   LessonPlanSection[]
+  lessonPlanAssessmentBlueprints LessonPlanAssessmentBlueprint[]
   lessonSessions       LessonSession[]
   lessonParticipants   LessonSessionParticipant[]
   lessonEvents         LessonSessionEvent[]
   auditEvents          AuditEvent[]
   canonicalQuestions   CanonicalQuestion[]
+  storedReports        StoredReport[]
 
   @@index([isActive])
 }
@@ -307,8 +317,10 @@ model Student {
   integrationLinks   StudentIntegrationLink[]
   coursePlans        CoursePlan[]
   coursePlanItems    CoursePlanItem[]
+  lessonPlans        LessonPlan[]
   lessonParticipants LessonSessionParticipant[]
   lessonEvents       LessonSessionEvent[]
+  storedReports      StoredReport[]
 
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
@@ -466,6 +478,7 @@ model CurriculumObjective {
   canonicalQuestions CanonicalQuestion[]
   wrapperVectors     WrapperVector[]
   coursePlanItems    CoursePlanItem[]
+  lessonPlanObjectives LessonPlanObjective[]
   lessonSessions     LessonSession[]
 
   @@unique([organisationId, code])
@@ -753,6 +766,7 @@ model Attempt {
 
   items   AttemptItem[]
   uploads Upload[]
+  storedReports StoredReport[]
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -766,6 +780,37 @@ model Attempt {
   @@index([threadId])
   @@index([strandId])
   @@index([status])
+}
+
+model StoredReport {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  attemptId String?
+  attempt   Attempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+
+  subject Subject
+  title   String
+
+  storage       StorageProvider @default(LOCAL)
+  storageKey    String
+  filename      String
+  mimeType      String
+  sizeBytes     BigInt
+  checksumSha256 String?
+  publicToken   String @unique
+
+  generatedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([organisationId])
+  @@index([studentId, subject, generatedAt])
+  @@index([attemptId])
 }
 
 model AttemptItem {
@@ -960,6 +1005,138 @@ model CoursePlanItem {
   @@index([status])
 }
 
+model LessonPlan {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  studentId String?
+  student   Student? @relation(fields: [studentId], references: [id], onDelete: SetNull)
+
+  subject Subject @default(MATHS)
+  keyStage KeyStage?
+  yearGroup Int?
+
+  title  String
+  topic  String
+  status String @default("DRAFT")
+  source String @default("OAK_ALIGNED_LLM")
+
+  assessmentAuthority String @default("OAK_OBJECTIVES")
+  assessmentCadenceWeeks Int @default(4)
+
+  teachingContextJson Json?
+  oakAuthorityJson    Json?
+  assessmentPolicyJson Json?
+  planJson Json?
+
+  objectives LessonPlanObjective[]
+  sections   LessonPlanSection[]
+  assessmentBlueprints LessonPlanAssessmentBlueprint[]
+  lessonSessions LessonSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organisationId])
+  @@index([studentId])
+  @@index([subject])
+  @@index([keyStage, yearGroup])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model LessonPlanObjective {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  lessonPlanId String
+  lessonPlan   LessonPlan @relation(fields: [lessonPlanId], references: [id], onDelete: Cascade)
+
+  objectiveId String
+  objective   CurriculumObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+
+  sequence Int
+  role     String @default("ANCHOR")
+
+  strand    String
+  yearGroup Int?
+  alignmentConfidence Float @default(0.75)
+  alignmentRationale  String
+  taughtContentSummary String?
+  generatedContentNotes String?
+  assessmentEligible Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([lessonPlanId, objectiveId])
+  @@unique([lessonPlanId, sequence])
+  @@index([organisationId])
+  @@index([lessonPlanId])
+  @@index([objectiveId])
+  @@index([strand])
+  @@index([assessmentEligible])
+}
+
+model LessonPlanSection {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  lessonPlanId String
+  lessonPlan   LessonPlan @relation(fields: [lessonPlanId], references: [id], onDelete: Cascade)
+
+  sequence Int
+  phase    String
+  title    String
+  durationMinutes Int
+  source String @default("LLM_GENERATED")
+
+  teacherActions String[]
+  studentActions String[]
+  workedExampleJson Json?
+  boardSpecJson     Json?
+  practiceSpecJson  Json?
+  assessmentLinksJson Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([lessonPlanId, sequence])
+  @@index([organisationId])
+  @@index([lessonPlanId])
+  @@index([phase])
+  @@index([source])
+}
+
+model LessonPlanAssessmentBlueprint {
+  id             String       @id @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  lessonPlanId String
+  lessonPlan   LessonPlan @relation(fields: [lessonPlanId], references: [id], onDelete: Cascade)
+
+  cadenceWeeks Int @default(4)
+  status String @default("DRAFT")
+
+  authorityJson Json
+  objectiveMixJson Json
+  generatedQuestionPolicyJson Json
+  quizDraftJson Json?
+  reportingJson Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organisationId])
+  @@index([lessonPlanId])
+  @@index([cadenceWeeks])
+  @@index([status])
+}
+
 model LessonSession {
   id             String       @id @default(cuid())
   organisationId String
@@ -970,6 +1147,9 @@ model LessonSession {
 
   coursePlanId String?
   coursePlan   CoursePlan? @relation(fields: [coursePlanId], references: [id], onDelete: SetNull)
+
+  lessonPlanId String?
+  lessonPlan   LessonPlan? @relation(fields: [lessonPlanId], references: [id], onDelete: SetNull)
 
   objectiveId String
   objective   CurriculumObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
@@ -993,6 +1173,7 @@ model LessonSession {
   @@index([organisationId])
   @@index([tutorUserId])
   @@index([coursePlanId])
+  @@index([lessonPlanId])
   @@index([objectiveId])
   @@index([status])
   @@index([currentBlockKey])

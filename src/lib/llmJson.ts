@@ -6,7 +6,14 @@ function mustEnv(name: string) {
   return v;
 }
 
-export async function llmJson(prompt: string): Promise<string> {
+export async function llmJson(
+  prompt: string,
+  options?: {
+    maxCompletionTokens?: number;
+    systemPrompt?: string;
+    temperature?: number;
+  }
+): Promise<string> {
   const endpoint = mustEnv("AZURE_OPENAI_ENDPOINT").replace(/\/+$/, "");
   const deployment = mustEnv("AZURE_OPENAI_DEPLOYMENT");
   const apiKey = mustEnv("AZURE_OPENAI_API_KEY");
@@ -24,11 +31,13 @@ export async function llmJson(prompt: string): Promise<string> {
       "api-key": apiKey,
     },
     body: JSON.stringify({
-      max_completion_tokens: 60,
+      max_completion_tokens: options?.maxCompletionTokens ?? 60,
+      temperature: options?.temperature ?? 0,
       messages: [
         {
           role: "system",
           content:
+            options?.systemPrompt ??
             "You are a classifier. Return ONLY valid JSON. No markdown. No commentary.",
         },
         { role: "user", content: prompt },

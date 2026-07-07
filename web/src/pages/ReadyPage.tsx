@@ -3,8 +3,30 @@ import { useNavigate } from "react-router-dom";
 import Layout from "../components/Layout";
 import { startAssessment } from "../api/assessmentApi";
 import { loadState, saveState } from "../utils/storage";
-import { defaultStartingYearFromSchoolYear } from "../utils/schoolYear";
+import {
+  defaultStartingYearFromSchoolYear,
+  normaliseAssessmentYear,
+} from "../utils/schoolYear";
 import { getAgePresentation } from "../utils/agePresentation";
+
+const ASSESSMENT_SUBJECTS = ["MATHS", "SCIENCE"] as const;
+
+function getSubjectReadyCopy(
+  presentation: ReturnType<typeof getAgePresentation>,
+  subject: "MATHS" | "SCIENCE"
+) {
+  if (subject !== "SCIENCE") return presentation;
+
+  return {
+    ...presentation,
+    kicker: "Newton Centre Science",
+    readyTitle: "Ready to begin your science check-in?",
+    readySubtitle: "The questions will adapt as we learn what feels secure.",
+    readySetupText:
+      "The science assessment starts just below current school year and adjusts as evidence builds.",
+    startButtonLabel: "Begin science check-in",
+  };
+}
 
 export default function ReadyPage() {
   const navigate = useNavigate();
@@ -13,6 +35,9 @@ export default function ReadyPage() {
 
   const state = loadState();
   const student = state.student;
+  const [subject, setSubject] = useState<"MATHS" | "SCIENCE">(
+    state.subject === "SCIENCE" ? "SCIENCE" : "MATHS"
+  );
 
   if (!student) {
     navigate("/onboarding");
@@ -20,9 +45,21 @@ export default function ReadyPage() {
   }
 
   const ensuredStudent = student;
-  const presentation = getAgePresentation(ensuredStudent.student.schoolYear);
+  const availableSubjects = ASSESSMENT_SUBJECTS;
+  const selectedSubject = availableSubjects.includes(subject) ? subject : availableSubjects[0] ?? "MATHS";
+  const presentation = getSubjectReadyCopy(
+    getAgePresentation(ensuredStudent.student.schoolYear),
+    selectedSubject
+  );
   const startingYear = defaultStartingYearFromSchoolYear(
-    ensuredStudent.student.schoolYear
+    normaliseAssessmentYear(
+      ensuredStudent.student.schoolYear,
+      ensuredStudent.student.age
+    )
+  );
+  const assessmentYear = normaliseAssessmentYear(
+    ensuredStudent.student.schoolYear,
+    ensuredStudent.student.age
   );
 
   async function handleStart() {
@@ -32,12 +69,14 @@ export default function ReadyPage() {
     try {
       const started = await startAssessment({
         studentId: ensuredStudent.studentId,
-        childCurrentYear: ensuredStudent.student.schoolYear,
+        childCurrentYear: assessmentYear,
+        subject: selectedSubject,
       });
 
       saveState({
         ...state,
         student: ensuredStudent,
+        subject: started.subject,
         sessionId: started.sessionId,
         entryYear: started.entryYear,
         currentQuestion: started.firstQuestion,
@@ -91,6 +130,24 @@ export default function ReadyPage() {
           <p className="meta">
             {presentation.readySetupText}
           </p>
+          {availableSubjects.length ? (
+            <>
+              <label className="label">Assessment subject</label>
+              <div className="button-row" aria-label="Choose assessment subject">
+                {availableSubjects.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    className={selectedSubject === item ? "btn btn-primary" : "btn btn-secondary"}
+                    onClick={() => setSubject(item)}
+                  >
+                    {item === "MATHS" ? "Maths" : "Science"}
+                  </button>
+                ))}
+              </div>
+              <div style={{ height: 14 }} />
+            </>
+          ) : null}
 
           {error ? <div className="error-box">{error}</div> : null}
 

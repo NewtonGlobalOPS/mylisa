@@ -38,6 +38,41 @@ function makeRow(input: Partial<AssessmentPoolRow> & Pick<AssessmentPoolRow, "id
   };
 }
 
+test("runtime question construction requires canonical year metadata", () => {
+  assert.throws(
+    () =>
+      buildRuntimeQuestion({
+        ...makeRow({
+          id: "missing-year",
+          objectiveId: "obj-missing-year",
+          strand: "Number",
+        }),
+        yearGroup: null,
+      }),
+    /valid year group/i
+  );
+});
+
+test("runtime question uses supplied canonical strand before inferred geometry", () => {
+  const question = buildRuntimeQuestion(
+    makeRow({
+      id: "canonical-strand",
+      objectiveId: "obj-canonical-strand",
+      yearGroup: 5,
+      strand: "Number",
+      title: "Geometry-looking title about angles",
+      statement: "Use multiplication facts in a shape context.",
+      promptText: "A rectangle array has 4 rows of 6. How many counters are there?",
+      answerText: "24",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "geometry" },
+    })
+  );
+
+  assert.equal(question.yearGroup, 5);
+  assert.equal(question.strand, "NUMBER");
+});
+
 test("initial queue samples across different strands before repeating", () => {
   const pool = buildRuntimeQuestionPool([
     makeRow({
@@ -290,7 +325,45 @@ test("entry year starts one below the learner year across phases when available"
   }
 });
 
-test("weak year 3 performance can descend to year 1 when lower years exist", () => {
+test("entry year stays one below the learner year even when that exact year is missing", () => {
+  const pool = buildRuntimeQuestionPool([
+    makeRow({
+      id: "missing-y9",
+      objectiveId: "obj-missing-y9",
+      yearGroup: 9,
+      strand: "Number",
+      promptText: "90 + 1 =",
+      answerText: "91",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "number_y9" },
+    }),
+    makeRow({
+      id: "missing-y11",
+      objectiveId: "obj-missing-y11",
+      yearGroup: 11,
+      strand: "Number",
+      promptText: "110 + 1 =",
+      answerText: "111",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "number_y11" },
+    }),
+  ]);
+
+  withDeterministicRandom(() => {
+    const session = createAssessmentSession({
+      childCurrentYear: 11,
+      questions: pool,
+      maxQuestions: 10,
+      extensionMaxQuestions: 10,
+    });
+
+    assert.equal(session.entryYear, 10);
+    assert.equal(session.minimumBandYear, 9);
+    assert.equal(session.maximumBandYear, 11);
+  });
+});
+
+test("weak year 3 performance stays within the one-year band window", () => {
   const pool = buildRuntimeQuestionPool([
     makeRow({
       id: "desc-y1-e",
@@ -392,7 +465,8 @@ test("weak year 3 performance can descend to year 1 when lower years exist", () 
 
     const fourth = getNextQuestion(session);
     assert.ok(fourth);
-    assert.equal(fourth.yearGroup, 1);
+    assert.ok([3, 4].includes(fourth.yearGroup));
+    assert.notEqual(fourth.yearGroup, 1);
   });
 });
 
@@ -476,6 +550,182 @@ test("strong year 3 performance promotes a year 4 learner to year 4 after enough
   });
 });
 
+test("target strand prefers nearby years before distant fallback questions", () => {
+  const pool = buildRuntimeQuestionPool([
+    makeRow({
+      id: "number-y9-a",
+      objectiveId: "obj-number-y9-a",
+      yearGroup: 9,
+      strand: "Number",
+      promptText: "3x + 1 when x = 4",
+      answerText: "13",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "number_y9" },
+    }),
+    makeRow({
+      id: "ratio-y7-a",
+      objectiveId: "obj-ratio-y7-a",
+      yearGroup: 7,
+      strand: "Ratio",
+      promptText: "Write 50% as a fraction.",
+      answerText: "1/2",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "ratio_y7" },
+    }),
+    makeRow({
+      id: "ratio-y8-a",
+      objectiveId: "obj-ratio-y8-a",
+      yearGroup: 8,
+      strand: "Ratio",
+      promptText: "Simplify 8:12.",
+      answerText: "2:3",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "ratio_y8" },
+    }),
+    makeRow({
+      id: "ratio-y10-a",
+      objectiveId: "obj-ratio-y10-a",
+      yearGroup: 10,
+      strand: "Ratio",
+      promptText: "Increase 80 by 15%.",
+      answerText: "92",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "ratio_y10" },
+    }),
+    makeRow({
+      id: "ratio-y3-a",
+      objectiveId: "obj-ratio-y3-a",
+      yearGroup: 3,
+      strand: "Ratio",
+      promptText: "Find half of 12.",
+      answerText: "6",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "ratio_y3" },
+    }),
+  ]);
+
+  withDeterministicRandom(() => {
+    const session = createAssessmentSession({
+      childCurrentYear: 10,
+      questions: pool,
+      maxQuestions: 10,
+      extensionMaxQuestions: 10,
+    });
+
+    assert.equal(session.entryYear, 9);
+
+    const first = getNextQuestion(session);
+    assert.ok(first);
+    submitAnswer(session, {
+      questionId: first.id,
+      rawAnswer: first.answerText,
+    });
+
+    const second = getNextQuestion(session);
+    assert.ok(second);
+    assert.equal(second.strand, "RATIO");
+    assert.ok([8, 10].includes(second.yearGroup));
+  });
+});
+
+test("assessment never serves questions outside the active one-year window", () => {
+  const pool = buildRuntimeQuestionPool([
+    makeRow({
+      id: "g-window-number-y7",
+      objectiveId: "obj-g-window-number-y7",
+      yearGroup: 7,
+      strand: "Number",
+      promptText: "Calculate: 1/2 + 1/4",
+      answerText: "3/4",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "number_y7" },
+    }),
+    makeRow({
+      id: "g-window-algebra-y7",
+      objectiveId: "obj-g-window-algebra-y7",
+      yearGroup: 7,
+      strand: "Algebra",
+      promptText: "Solve: x + 7 = 15",
+      answerText: "8",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "algebra_y7" },
+    }),
+    makeRow({
+      id: "g-window-geometry-y7",
+      objectiveId: "obj-g-window-geometry-y7",
+      yearGroup: 7,
+      strand: "Geometry",
+      promptText: "Angles on a straight line add to?",
+      answerText: "180",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "geometry_y7" },
+    }),
+    makeRow({
+      id: "g-window-ratio-y8",
+      objectiveId: "obj-g-window-ratio-y8",
+      yearGroup: 8,
+      strand: "Ratio",
+      promptText: "A map uses scale 1cm : 5km. What distance is 4cm?",
+      answerText: "20",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "ratio_y8" },
+    }),
+    makeRow({
+      id: "g-window-data-y4",
+      objectiveId: "obj-g-window-data-y4",
+      yearGroup: 4,
+      strand: "Data",
+      promptText: "A bar chart shows after-school club choices: Art 26, Music 14, Sport 16. How many more pupils chose Art than Music?",
+      answerText: "12",
+      difficulty: DifficultyBand.MEDIUM,
+      contentJson: { domain: "data_y4" },
+    }),
+    makeRow({
+      id: "g-window-data-y3",
+      objectiveId: "obj-g-window-data-y3",
+      yearGroup: 3,
+      strand: "Data",
+      promptText: "A tally chart shows favourite school clubs: Chess 11, Drama 4, Art 6. How many more pupils chose Chess than Drama?",
+      answerText: "7",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "data_y3" },
+    }),
+    makeRow({
+      id: "g-window-data-y1",
+      objectiveId: "obj-g-window-data-y1",
+      yearGroup: 1,
+      strand: "Data",
+      promptText: "7, 9, 11, [], 15",
+      answerText: "13",
+      difficulty: DifficultyBand.MEDIUM,
+      contentJson: { domain: "data_y1" },
+    }),
+  ]);
+
+  withDeterministicRandom(() => {
+    const session = createAssessmentSession({
+      childCurrentYear: 8,
+      questions: pool,
+      maxQuestions: 12,
+      extensionMaxQuestions: 12,
+    });
+
+    assert.equal(session.entryYear, 7);
+    assert.equal(session.minimumBandYear, 6);
+    assert.equal(session.maximumBandYear, 8);
+
+    for (let index = 0; index < 4; index += 1) {
+      const next = getNextQuestion(session);
+      assert.ok(next);
+      assert.ok(next.yearGroup >= 6 && next.yearGroup <= 8);
+      submitAnswer(session, {
+        questionId: next.id,
+        rawAnswer: next.answerText,
+      });
+    }
+  });
+});
+
 test("text response questions do not add a generic wrapper instruction", () => {
   const question = buildRuntimeQuestion(
     makeRow({
@@ -524,6 +774,58 @@ test("range questions accept subtraction working as a correct response", () => {
   });
 
   assert.equal(result.isCorrect, true);
+});
+
+test("typed numeric answers accept equivalent word aliases", () => {
+  const pool = buildRuntimeQuestionPool([
+    makeRow({
+      id: "word-alias-q",
+      objectiveId: "obj-word-alias-q",
+      yearGroup: 7,
+      strand: "Geometry",
+      promptText: "The perimeter of the regular hexagon is ____cm.",
+      answerText: "54 / fifty four",
+      difficulty: DifficultyBand.EASY,
+      contentJson: {
+        answerContract: "short_answer_alias",
+        canonicalTruth: {
+          answerContract: "short_answer_alias",
+          immutableAnswers: ["54 / fifty four"],
+        },
+      },
+    }),
+  ]);
+
+  const session = createAssessmentSession({
+    childCurrentYear: 8,
+    questions: pool,
+    maxQuestions: 10,
+    extensionMaxQuestions: 10,
+  });
+
+  const next = getNextQuestion(session);
+  assert.ok(next);
+
+  const digitResult = submitAnswer(session, {
+    questionId: next.id,
+    rawAnswer: "54",
+  });
+  assert.equal(digitResult.isCorrect, true);
+
+  const wordSession = createAssessmentSession({
+    childCurrentYear: 8,
+    questions: pool,
+    maxQuestions: 10,
+    extensionMaxQuestions: 10,
+  });
+  const wordNext = getNextQuestion(wordSession);
+  assert.ok(wordNext);
+
+  const wordResult = submitAnswer(wordSession, {
+    questionId: wordNext.id,
+    rawAnswer: "fifty-four cm",
+  });
+  assert.equal(wordResult.isCorrect, true);
 });
 
 test("multiple choice marking uses the selected choice key", () => {
@@ -586,7 +888,111 @@ test("substitution-style algebra multiple choice does not include placeholder op
   assert.equal(next.choices.some((choice) => choice.label === "6"), true);
 });
 
-test("year 10 start band cannot drop below year 7", () => {
+test("comparison symbol questions keep contextual answer options", () => {
+  const pool = buildRuntimeQuestionPool([
+    makeRow({
+      id: "cmp-1",
+      objectiveId: "obj-cmp-1",
+      yearGroup: 4,
+      strand: "Number",
+      promptText: "Put <, > or = between 4567 and 4567.",
+      answerText: "=",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { itemType: "COMPARISON", domain: "compare" },
+    }),
+  ]);
+
+  withDeterministicRandom(() => {
+    const session = createAssessmentSession({
+      childCurrentYear: 4,
+      questions: pool,
+      maxQuestions: 10,
+      extensionMaxQuestions: 10,
+    });
+
+    const next = getNextQuestion(session);
+    assert.ok(next);
+
+    const labels = next.choices.map((choice) => choice.label);
+    assert.equal(labels.includes("="), true);
+    assert.equal(labels.includes("<"), true);
+    assert.equal(labels.includes(">"), true);
+    assert.equal(labels.some((label) => /^\d+$/.test(label)), false);
+  });
+});
+
+test("shape-name questions keep shape-family distractors", () => {
+  const pool = buildRuntimeQuestionPool([
+    makeRow({
+      id: "shape-1",
+      objectiveId: "obj-shape-1",
+      yearGroup: 2,
+      strand: "Geometry",
+      promptText: "What shape is this?",
+      answerText: "triangle",
+      difficulty: DifficultyBand.EASY,
+      itemType: "SHAPE_NAME",
+      contentJson: { itemType: "SHAPE_NAME", domain: "shape" },
+    }),
+  ]);
+
+  withDeterministicRandom(() => {
+    const session = createAssessmentSession({
+      childCurrentYear: 2,
+      questions: pool,
+      maxQuestions: 10,
+      extensionMaxQuestions: 10,
+    });
+
+    const next = getNextQuestion(session);
+    assert.ok(next);
+
+    const labels = next.choices.map((choice) => choice.label.toLowerCase());
+    assert.equal(labels.includes("triangle"), true);
+    assert.equal(labels.some((label) => /^\d+$/.test(label)), false);
+    assert.equal(
+      labels.every((label) =>
+        ["triangle", "square", "rectangle", "circle", "pentagon", "hexagon", "cube", "cone"].includes(label)
+      ),
+      true
+    );
+  });
+});
+
+test("turn-direction questions keep directional distractors", () => {
+  const pool = buildRuntimeQuestionPool([
+    makeRow({
+      id: "turn-1",
+      objectiveId: "obj-turn-1",
+      yearGroup: 3,
+      strand: "Geometry",
+      promptText: "Which way should the arrow turn?",
+      answerText: "clockwise",
+      difficulty: DifficultyBand.EASY,
+      itemType: "TURN_DIRECTION",
+      contentJson: { itemType: "TURN_DIRECTION", domain: "turn_direction" },
+    }),
+  ]);
+
+  withDeterministicRandom(() => {
+    const session = createAssessmentSession({
+      childCurrentYear: 3,
+      questions: pool,
+      maxQuestions: 10,
+      extensionMaxQuestions: 10,
+    });
+
+    const next = getNextQuestion(session);
+    assert.ok(next);
+
+    const labels = next.choices.map((choice) => choice.label.toLowerCase());
+    assert.equal(labels.includes("clockwise"), true);
+    assert.equal(labels.includes("anticlockwise"), true);
+    assert.equal(labels.some((label) => /^\d+$/.test(label)), false);
+  });
+});
+
+test("year 10 start band cannot drop below year 8", () => {
   const years = [7, 8, 9, 10];
   const pool = buildRuntimeQuestionPool(
     years.flatMap((yearGroup) =>
@@ -615,7 +1021,7 @@ test("year 10 start band cannot drop below year 7", () => {
     });
 
     assert.equal(session.entryYear, 9);
-    assert.equal(session.minimumBandYear, 7);
+    assert.equal(session.minimumBandYear, 8);
 
     while (!session.isComplete) {
       const next = getNextQuestion(session);
@@ -626,7 +1032,185 @@ test("year 10 start band cannot drop below year 7", () => {
       });
     }
 
-    assert.equal(session.currentBandYear, 7);
+    assert.equal(session.currentBandYear, 8);
+  });
+});
+
+test("year 11 learners can promote to year 11 but not beyond it", () => {
+  const pool = buildRuntimeQuestionPool([
+    makeRow({
+      id: "y11-start-y10-a",
+      objectiveId: "obj-y11-start-y10-a",
+      yearGroup: 10,
+      strand: "Number",
+      promptText: "Expand: 3(x + 2)",
+      answerText: "3x + 6",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "number_y10" },
+    }),
+    makeRow({
+      id: "y11-start-y10-b",
+      objectiveId: "obj-y11-start-y10-b",
+      yearGroup: 10,
+      strand: "Algebra",
+      promptText: "Solve: 2x + 1 = 11",
+      answerText: "5",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "algebra_y10" },
+    }),
+    makeRow({
+      id: "y11-start-y10-c",
+      objectiveId: "obj-y11-start-y10-c",
+      yearGroup: 10,
+      strand: "Geometry",
+      promptText: "Angle sum of a quadrilateral?",
+      answerText: "360",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "geometry_y10" },
+    }),
+    makeRow({
+      id: "y11-start-y10-d",
+      objectiveId: "obj-y11-start-y10-d",
+      yearGroup: 10,
+      strand: "Ratio",
+      promptText: "Write 35% as a decimal.",
+      answerText: "0.35",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "ratio_y10" },
+    }),
+    makeRow({
+      id: "y11-start-y10-e",
+      objectiveId: "obj-y11-start-y10-e",
+      yearGroup: 10,
+      strand: "Data",
+      promptText: "Find the mean of 4, 6, 8.",
+      answerText: "6",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "data_y10" },
+    }),
+    makeRow({
+      id: "y11-up-y11-a",
+      objectiveId: "obj-y11-up-y11-a",
+      yearGroup: 11,
+      strand: "Number",
+      promptText: "Simplify surd: 2√3 + 5√3",
+      answerText: "7√3",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "number_y11" },
+    }),
+    makeRow({
+      id: "y11-up-y11-b",
+      objectiveId: "obj-y11-up-y11-b",
+      yearGroup: 11,
+      strand: "Algebra",
+      promptText: "Solve: x^2 = 49",
+      answerText: "7",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "algebra_y11" },
+    }),
+    makeRow({
+      id: "y11-up-y11-c",
+      objectiveId: "obj-y11-up-y11-c",
+      yearGroup: 11,
+      strand: "Geometry",
+      promptText: "Circumference formula uses?",
+      answerText: "2πr",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "geometry_y11" },
+    }),
+  ]);
+
+  withDeterministicRandom(() => {
+    const session = createAssessmentSession({
+      childCurrentYear: 11,
+      questions: pool,
+      maxQuestions: 12,
+      extensionMaxQuestions: 12,
+    });
+
+    assert.equal(session.entryYear, 10);
+    assert.equal(session.maximumBandYear, 11);
+
+    for (let index = 0; index < 8; index += 1) {
+      const next = getNextQuestion(session);
+      assert.ok(next);
+      submitAnswer(session, {
+        questionId: next.id,
+        rawAnswer: next.answerText,
+      });
+    }
+
+    assert.equal(session.currentBandYear, 11);
+
+    const next = getNextQuestion(session);
+    if (next) {
+      assert.ok(next.yearGroup <= 11);
+    }
+  });
+});
+
+test("confidence does not end the assessment before a reasonable question count", () => {
+  const pool = buildRuntimeQuestionPool(
+    Array.from({ length: 15 }, (_, index) =>
+      makeRow({
+        id: `conf-q-${index}`,
+        objectiveId: `conf-obj-${index}`,
+        yearGroup: index < 8 ? 9 : 10,
+        strand:
+          index % 5 === 0
+            ? "Number"
+            : index % 5 === 1
+            ? "Algebra"
+            : index % 5 === 2
+            ? "Ratio"
+            : index % 5 === 3
+            ? "Geometry"
+            : "Data",
+        promptText: `Question ${index}`,
+        answerText: `${index + 1}`,
+        difficulty: index % 2 === 0 ? DifficultyBand.EASY : DifficultyBand.MEDIUM,
+        contentJson: { domain: `confidence_${index}` },
+      })
+    )
+  );
+
+  withDeterministicRandom(() => {
+    const session = createAssessmentSession({
+      childCurrentYear: 10,
+      questions: pool,
+      maxQuestions: 25,
+      extensionMaxQuestions: 30,
+    });
+
+    for (let index = 0; index < 11; index += 1) {
+      const next = getNextQuestion(session);
+      assert.ok(next);
+      const outcome = submitAnswer(session, {
+        questionId: next.id,
+        rawAnswer: next.answerText,
+      });
+      assert.equal(outcome.isComplete, false);
+    }
+
+    let completionQuestionCount: number | null = null;
+
+    for (let index = 11; index < 15; index += 1) {
+      const next = getNextQuestion(session);
+      assert.ok(next);
+      const outcome = submitAnswer(session, {
+        questionId: next.id,
+        rawAnswer: next.answerText,
+      });
+
+      if (outcome.isComplete) {
+        completionQuestionCount = session.responses.length;
+        break;
+      }
+    }
+
+    assert.ok(
+      completionQuestionCount == null || completionQuestionCount >= 12
+    );
   });
 });
 
@@ -858,6 +1442,136 @@ test("overall band treats strands secure at a higher year as also secure at entr
   });
 
   assert.equal(result.overallWorkingBand, "NEXT_SECURE");
+});
+
+test("high-year perfect evidence does not collapse to below entry because lower years were unasked", () => {
+  const pool = buildRuntimeQuestionPool([
+    makeRow({
+      id: "n-y7-a",
+      objectiveId: "obj-n-y7-a",
+      yearGroup: 7,
+      strand: "Number",
+      promptText: "7 + 5 =",
+      answerText: "12",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "number_y7" },
+    }),
+    makeRow({
+      id: "n-y7-b",
+      objectiveId: "obj-n-y7-b",
+      yearGroup: 7,
+      strand: "Number",
+      promptText: "18 - 6 =",
+      answerText: "12",
+      difficulty: DifficultyBand.MEDIUM,
+      contentJson: { domain: "number_y7" },
+    }),
+    makeRow({
+      id: "a-y7-a",
+      objectiveId: "obj-a-y7-a",
+      yearGroup: 7,
+      strand: "Algebra",
+      promptText: "If x + 4 = 9, what is x?",
+      answerText: "5",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "algebra_y7" },
+    }),
+    makeRow({
+      id: "a-y7-b",
+      objectiveId: "obj-a-y7-b",
+      yearGroup: 7,
+      strand: "Algebra",
+      promptText: "If 2x = 14, what is x?",
+      answerText: "7",
+      difficulty: DifficultyBand.MEDIUM,
+      contentJson: { domain: "algebra_y7" },
+    }),
+    makeRow({
+      id: "r-y8-a",
+      objectiveId: "obj-r-y8-a",
+      yearGroup: 8,
+      strand: "Ratio",
+      promptText: "Simplify 12:18.",
+      answerText: "2:3",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "ratio_y8" },
+    }),
+    makeRow({
+      id: "r-y8-b",
+      objectiveId: "obj-r-y8-b",
+      yearGroup: 8,
+      strand: "Ratio",
+      promptText: "Write 0.25 as a fraction.",
+      answerText: "1/4",
+      difficulty: DifficultyBand.MEDIUM,
+      contentJson: { domain: "ratio_y8" },
+    }),
+    makeRow({
+      id: "g-y9-a",
+      objectiveId: "obj-g-y9-a",
+      yearGroup: 9,
+      strand: "Geometry",
+      promptText: "Angles on a straight line add to?",
+      answerText: "180",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "geometry_y9" },
+    }),
+    makeRow({
+      id: "g-y9-b",
+      objectiveId: "obj-g-y9-b",
+      yearGroup: 9,
+      strand: "Geometry",
+      promptText: "Angles in a triangle add to?",
+      answerText: "180",
+      difficulty: DifficultyBand.MEDIUM,
+      contentJson: { domain: "geometry_y9" },
+    }),
+    makeRow({
+      id: "d-y9-a",
+      objectiveId: "obj-d-y9-a",
+      yearGroup: 9,
+      strand: "Data",
+      promptText: "What is the mean of 3, 6, 9?",
+      answerText: "6",
+      difficulty: DifficultyBand.EASY,
+      contentJson: { domain: "data_y9" },
+    }),
+    makeRow({
+      id: "d-y9-b",
+      objectiveId: "obj-d-y9-b",
+      yearGroup: 9,
+      strand: "Data",
+      promptText: "What is the range of 4, 9, 11?",
+      answerText: "7",
+      difficulty: DifficultyBand.MEDIUM,
+      contentJson: { domain: "data_y9" },
+    }),
+  ]);
+
+  const result = withDeterministicRandom(() => {
+    const session = createAssessmentSession({
+      childCurrentYear: 10,
+      questions: pool,
+      maxQuestions: 20,
+      extensionMaxQuestions: 20,
+    });
+
+    for (const question of pool) {
+      submitAnswer(session, {
+        questionId: question.id,
+        rawAnswer: question.answerText,
+      });
+    }
+
+    return buildAssessmentResult(session);
+  });
+
+  const number = result.strands.find((strand) => strand.strand === "NUMBER");
+  const geometry = result.strands.find((strand) => strand.strand === "GEOMETRY");
+
+  assert.equal(number?.secureYear, 7);
+  assert.equal(geometry?.secureYear, 9);
+  assert.notEqual(result.overallWorkingBand, "BELOW_ENTRY");
 });
 
 test("all-wrong sessions do not build high confidence", () => {
